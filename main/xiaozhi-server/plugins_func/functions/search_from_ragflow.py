@@ -42,7 +42,7 @@ DEFAULT_DIRECT_ANSWER_MAX_CHARS = 75
 DEFAULT_DIRECT_ALIAS_CACHE_ENABLED = True
 DEFAULT_STAGED_FIRST_REPLY_ENABLED = True
 DEFAULT_STAGED_FIRST_REPLY = ""
-DEFAULT_STAGED_RAG_FIRST_SENTENCE_ENABLED = True
+DEFAULT_STAGED_RAG_FIRST_SENTENCE_ENABLED = False
 DIRECT_ANSWER_ALIAS_CACHE_NAMESPACE = "direct_answer_alias"
 # Bump whenever direct-answer parsing or safety rules change, so an in-process
 # cache can never preserve an answer produced by an older rule set.
