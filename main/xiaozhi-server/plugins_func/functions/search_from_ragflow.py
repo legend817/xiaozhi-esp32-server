@@ -11,6 +11,12 @@ if TYPE_CHECKING:
 TAG = __name__
 logger = setup_logging()
 
+DEFAULT_PAGE_SIZE = 3
+DEFAULT_TOP_K = 16
+DEFAULT_SIMILARITY_THRESHOLD = 0.3
+DEFAULT_MAX_CONTEXT_CHUNKS = 3
+DEFAULT_MAX_CONTEXT_CHARS = 2200
+
 # 定义基础的函数描述模板
 SEARCH_FROM_RAGFLOW_FUNCTION_DESC = {
     "type": "function",
@@ -41,12 +47,30 @@ async def search_from_ragflow(conn: "ConnectionHandler", question=None):
     base_url = ragflow_config.get("base_url", "")
     api_key = ragflow_config.get("api_key", "")
     dataset_ids = ragflow_config.get("dataset_ids", [])
+    page_size = _get_int_config(ragflow_config, "page_size", DEFAULT_PAGE_SIZE, 1, 30)
+    top_k = _get_int_config(ragflow_config, "top_k", DEFAULT_TOP_K, 1, 1024)
+    similarity_threshold = _get_float_config(
+        ragflow_config, "similarity_threshold", DEFAULT_SIMILARITY_THRESHOLD, 0.0, 1.0
+    )
+    max_context_chunks = _get_int_config(
+        ragflow_config, "max_context_chunks", DEFAULT_MAX_CONTEXT_CHUNKS, 1, page_size
+    )
+    max_context_chars = _get_int_config(
+        ragflow_config, "max_context_chars", DEFAULT_MAX_CONTEXT_CHARS, 300, 10000
+    )
 
     url = base_url + "/api/v1/retrieval"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
     # 确保payload中的字符串都是UTF-8编码
-    payload = {"question": question, "dataset_ids": dataset_ids}
+    payload = {
+        "question": question,
+        "dataset_ids": dataset_ids,
+        "page": 1,
+        "page_size": page_size,
+        "top_k": top_k,
+        "similarity_threshold": similarity_threshold,
+    }
 
     try:
         start_time = time.monotonic()
@@ -103,10 +127,21 @@ async def search_from_ragflow(conn: "ConnectionHandler", question=None):
                 else:
                     contents.append(str(content))
 
-        if contents:
+        context_contents = _limit_context(contents, max_context_chunks, max_context_chars)
+        logger.bind(tag=TAG).info(
+            "LATENCY event=ragflow_context chunks={} selected_chunks={} selected_chars={} page_size={} top_k={} similarity_threshold={}",
+            len(chunks),
+            len(context_contents),
+            sum(len(content) for content in context_contents),
+            page_size,
+            top_k,
+            similarity_threshold,
+        )
+
+        if context_contents:
             # 组织知识库内容为引用模式
             context_text = f"# 关于问题【{question}】查到知识库如下\n"
-            context_text += "```\n\n\n".join(contents[:5])
+            context_text += "```\n\n\n".join(context_contents)
             context_text += "\n```"
         else:
             context_text = "根据知识库查询结果，没有相关信息。"
@@ -148,3 +183,33 @@ async def search_from_ragflow(conn: "ConnectionHandler", question=None):
         # 提供详细的错误信息
         error_response = f"RAG接口处理异常（{error_type}）：{str(e)}"
         return ActionResponse(Action.RESPONSE, None, error_response)
+
+
+def _get_int_config(config, key, default, min_value, max_value):
+    try:
+        value = int(config.get(key, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(min_value, min(max_value, value))
+
+
+def _get_float_config(config, key, default, min_value, max_value):
+    try:
+        value = float(config.get(key, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(min_value, min(max_value, value))
+
+
+def _limit_context(contents, max_chunks, max_chars):
+    selected = []
+    used_chars = 0
+    for content in contents[:max_chunks]:
+        remaining = max_chars - used_chars
+        if remaining <= 0:
+            break
+        if len(content) > remaining:
+            content = content[:remaining].rstrip()
+        selected.append(content)
+        used_chars += len(content)
+    return selected

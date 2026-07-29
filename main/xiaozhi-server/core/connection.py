@@ -1109,7 +1109,7 @@ class ConnectionHandler:
         except Exception:
             return {}
 
-    def _run_tool_sync(self, tool_name, arguments, latency=None):
+    def _run_tool_sync(self, tool_name, arguments, latency=None, return_tool_call=False):
         tool_call_data = {
             "id": str(uuid.uuid4().hex),
             "name": tool_name,
@@ -1142,6 +1142,8 @@ class ConnectionHandler:
                 str(result.result) if result.result else None,
                 report_tool_call=False,
             )
+            if return_tool_call:
+                return result, tool_call_data
             return result
         except Exception as e:
             tool_ms = LatencyTracker.ms_since(tool_started_at)
@@ -1158,7 +1160,10 @@ class ConnectionHandler:
             enqueue_tool_report(
                 self, tool_name, arguments or {}, str(e), report_tool_call=False
             )
-            return ActionResponse(action=Action.ERROR, response=str(e))
+            result = ActionResponse(action=Action.ERROR, response=str(e))
+            if return_tool_call:
+                return result, tool_call_data
+            return result
 
     def _finish_deterministic_reply(
         self, current_sentence_id, latency, response_policy, text
@@ -1298,6 +1303,40 @@ class ConnectionHandler:
 
         return False
 
+    def _handle_deterministic_knowledge_route(
+        self, query, route, current_sentence_id, latency, response_policy
+    ):
+        if (
+            route is None
+            or route.name != "enterprise_rag"
+            or "search_from_ragflow" not in set(route.tool_names or [])
+            or not self.func_handler.has_tool("search_from_ragflow")
+        ):
+            return False
+
+        self.logger.bind(tag=TAG).info(
+            "LATENCY event=deterministic_tool_route trace={} route={} tool=search_from_ragflow",
+            latency.trace_id,
+            route.name,
+        )
+        result, tool_call_data = self._run_tool_sync(
+            "search_from_ragflow",
+            {"question": query or ""},
+            latency,
+            return_tool_call=True,
+        )
+        self._handle_function_result([(result, tool_call_data)], depth=0)
+        self.tts.tts_text_queue.put(
+            TTSMessageDTO(
+                sentence_id=current_sentence_id,
+                sentence_type=SentenceType.LAST,
+                content_type=ContentType.ACTION,
+            )
+        )
+        latency.mark("chat_end")
+        self.logger.bind(tag=TAG).info("LATENCY event=chat_end {}", latency.summary())
+        return True
+
     def change_system_prompt(self, prompt):
         self.prompt = prompt
         # 更新系统prompt至上下文
@@ -1395,6 +1434,14 @@ class ConnectionHandler:
             depth == 0
             and tool_route is not None
             and self._handle_deterministic_device_route(
+                query, tool_route, current_sentence_id, latency, response_policy
+            )
+        ):
+            return True
+        if (
+            depth == 0
+            and tool_route is not None
+            and self._handle_deterministic_knowledge_route(
                 query, tool_route, current_sentence_id, latency, response_policy
             )
         ):
