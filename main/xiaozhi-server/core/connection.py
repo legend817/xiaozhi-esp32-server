@@ -45,6 +45,8 @@ from core.utils.prompt_manager import PromptManager
 from core.utils.voiceprint_provider import VoiceprintProvider
 from core.utils.util import get_system_error_response
 from core.utils import textUtils
+from core.utils.latency import LatencyTracker
+from core.utils.response_policy import ResponseBudget, build_response_policy
 
 
 TAG = __name__
@@ -150,6 +152,9 @@ class ConnectionHandler:
         self.first_activity_time = 0.0  # 记录首次活动的时间（毫秒）
         self.last_activity_time = 0.0  # 统一的活动时间戳（毫秒）
         self.vad_last_voice_time = 0.0  # 记录用户最后一次说话的时间（毫秒）
+        self.vad_first_voice_time = 0.0  # 记录本轮首次检测到语音的时间（毫秒）
+        self.vad_voice_stop_time = 0.0  # 记录本轮判定语音停止的时间（毫秒）
+        self.vad_trace_id = None
         self.client_voice_stop = False
         self.last_is_voice = False
 
@@ -167,6 +172,7 @@ class ConnectionHandler:
 
         # tts相关变量
         self.sentence_id = None
+        self.current_latency = None
         # 处理TTS响应没有文本返回
         self.tts_MessageText = ""
 
@@ -1031,9 +1037,28 @@ class ConnectionHandler:
         # 更新系统prompt至上下文
         self.dialogue.update_system_message(self.prompt)
 
+    def _inject_response_policy(self, dialogue, response_policy):
+        """Inject per-turn response constraints without writing them to history."""
+        if not dialogue or response_policy is None:
+            return dialogue
+        policy_prompt = (
+            "\n\n[本轮回复预算 ResponsePolicy_V1]\n"
+            f"- 策略：{response_policy.name}\n"
+            f"- 字数上限：{response_policy.max_chars}个汉字左右\n"
+            f"- {response_policy.instruction}\n"
+            f"- {response_policy.topic_guard}\n"
+            "- 必须优先保证首句可直接播报；不要输出Markdown表格、编号长列表或多段铺垫。"
+        )
+        if dialogue[0].get("role") == "system":
+            dialogue[0]["content"] = (dialogue[0].get("content") or "") + policy_prompt
+        else:
+            dialogue.insert(0, {"role": "system", "content": policy_prompt})
+        return dialogue
+
     def chat(self, query, depth=0):
         # 保存当前任务的sentence_id到局部变量，避免被新任务覆盖
         current_sentence_id = None
+        latency = None
 
         if query is not None:
             self.logger.bind(tag=TAG).info(f"大模型收到用户消息: {query}")
@@ -1042,6 +1067,15 @@ class ConnectionHandler:
         if depth == 0:
             current_sentence_id = str(uuid.uuid4().hex)
             self.sentence_id = current_sentence_id  # 更新共享属性
+            latency = LatencyTracker(self.session_id, current_sentence_id, query, depth)
+            latency.mark("chat_start")
+            self.current_latency = latency
+            self.logger.bind(tag=TAG).info(
+                "LATENCY event=chat_start trace={} sentence_id={} query_len={}",
+                latency.trace_id,
+                current_sentence_id,
+                len(query or ""),
+            )
             self.dialogue.put(Message(role="user", content=query))
             self.tts.tts_text_queue.put(
                 TTSMessageDTO(
@@ -1053,6 +1087,9 @@ class ConnectionHandler:
         else:
             # 递归调用时，使用当前的sentence_id
             current_sentence_id = self.sentence_id
+            latency = self.current_latency or LatencyTracker(
+                self.session_id, current_sentence_id, query, depth
+            )
 
         # 设置最大递归深度，避免无限循环，可根据实际需求调整
         MAX_DEPTH = 5
@@ -1086,6 +1123,16 @@ class ConnectionHandler:
                 functions.append(DIRECT_ANSWER_TOOL)
 
         response_message = []
+        response_policy = build_response_policy(query if depth == 0 else None)
+        response_budget = ResponseBudget(response_policy)
+        if depth == 0:
+            self.logger.bind(tag=TAG).info(
+                "LATENCY event=response_policy trace={} policy={} max_chars={} suffix={}",
+                latency.trace_id,
+                response_policy.name,
+                response_policy.max_chars,
+                bool(response_policy.suffix),
+            )
 
         try:
             # 使用带记忆的对话
@@ -1107,19 +1154,25 @@ class ConnectionHandler:
 
             if self.intent_type == "function_call" and functions is not None:
                 # 使用支持functions的streaming接口
+                latency.mark("llm_start")
+                dialogue = self.dialogue.get_llm_dialogue_with_memory(
+                    memory_str, self.config.get("voiceprint", {}), speaker_for_system
+                )
+                self._inject_response_policy(dialogue, response_policy)
                 llm_responses = self.llm.response_with_functions(
                     self.session_id,
-                    self.dialogue.get_llm_dialogue_with_memory(
-                        memory_str, self.config.get("voiceprint", {}), speaker_for_system
-                    ),
+                    dialogue,
                     functions=functions,
                 )
             else:
+                latency.mark("llm_start")
+                dialogue = self.dialogue.get_llm_dialogue_with_memory(
+                    memory_str, self.config.get("voiceprint", {}), speaker_for_system
+                )
+                self._inject_response_policy(dialogue, response_policy)
                 llm_responses = self.llm.response(
                     self.session_id,
-                    self.dialogue.get_llm_dialogue_with_memory(
-                        memory_str, self.config.get("voiceprint", {}), speaker_for_system
-                    ),
+                    dialogue,
                 )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
@@ -1141,6 +1194,13 @@ class ConnectionHandler:
                         content = response["content"]
                         tools_call = None
                     if content is not None and len(content) > 0:
+                        if latency.mark_once("llm_first_token"):
+                            self.logger.bind(tag=TAG).info(
+                                "LATENCY event=llm_first_token trace={} depth={} ms={}",
+                                latency.trace_id,
+                                depth,
+                                latency.since_ms("llm_start", "llm_first_token"),
+                            )
                         content_arguments += content
 
                     if not tool_call_flag and content_arguments.startswith("<tool_call>"):
@@ -1164,8 +1224,10 @@ class ConnectionHandler:
                                     new_part = da_text[sent_len:safe_end]
                                     # 清理 delta 中可能泄漏的 JSON 闭合垃圾
                                     new_part = self._clean_response_garbage(new_part)
+                                    new_part = response_budget.accept(new_part)
                                     if new_part:
                                         tc["_da_sent"] = safe_end
+                                        response_message.append(new_part)
                                         self.tts.tts_text_queue.put(
                                             TTSMessageDTO(
                                                 sentence_id=current_sentence_id,
@@ -1187,16 +1249,25 @@ class ConnectionHandler:
                     emotion_flag = False
 
                 if content is not None and len(content) > 0:
-                    if not tool_call_flag:
-                        response_message.append(content)
-                        self.tts.tts_text_queue.put(
-                            TTSMessageDTO(
-                                sentence_id=current_sentence_id,
-                                sentence_type=SentenceType.MIDDLE,
-                                content_type=ContentType.TEXT,
-                                content_detail=content,
-                            )
+                    if latency.mark_once("llm_first_token"):
+                        self.logger.bind(tag=TAG).info(
+                            "LATENCY event=llm_first_token trace={} depth={} ms={}",
+                            latency.trace_id,
+                            depth,
+                            latency.since_ms("llm_start", "llm_first_token"),
                         )
+                    if not tool_call_flag:
+                        budgeted_content = response_budget.accept(content)
+                        if budgeted_content:
+                            response_message.append(budgeted_content)
+                            self.tts.tts_text_queue.put(
+                                TTSMessageDTO(
+                                    sentence_id=current_sentence_id,
+                                    sentence_type=SentenceType.MIDDLE,
+                                    content_type=ContentType.TEXT,
+                                    content_detail=budgeted_content,
+                                )
+                            )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM stream processing error: {e}")
             self.tts.tts_text_queue.put(
@@ -1216,6 +1287,14 @@ class ConnectionHandler:
                     )
                 )
             return
+        latency.mark("llm_end")
+        self.logger.bind(tag=TAG).info(
+            "LATENCY event=llm_end trace={} depth={} ms={} first_token_ms={}",
+            latency.trace_id,
+            depth,
+            latency.since_ms("llm_start", "llm_end"),
+            latency.since_ms("llm_start", "llm_first_token"),
+        )
         # 处理function call
         if tool_call_flag:
             bHasError = False
@@ -1263,7 +1342,9 @@ class ConnectionHandler:
                             remaining = da_response[sent_len:]
                             if remaining:
                                 remaining = self._clean_response_garbage(remaining)
+                                remaining = response_budget.accept(remaining)
                                 if remaining:
+                                    response_message.append(remaining)
                                     self.tts.tts_text_queue.put(
                                         TTSMessageDTO(
                                             sentence_id=current_sentence_id,
@@ -1273,7 +1354,7 @@ class ConnectionHandler:
                                         )
                                     )
                             # 写入对话历史
-                            da_response = self._clean_response_garbage(da_response)
+                            da_response = "".join(response_message) or self._clean_response_garbage(da_response)
                             self.tts.store_tts_text(current_sentence_id, da_response)
                             self.dialogue.put(Message(role="assistant", content=da_response))
 
@@ -1320,23 +1401,42 @@ class ConnectionHandler:
                         ),
                         self.loop,
                     )
-                    futures_with_data.append((future, tool_call_data, tool_input))
+                    futures_with_data.append((future, tool_call_data, tool_input, LatencyTracker.now()))
 
                 # 工具调用超时时间，可配置，默认30秒
                 tool_call_timeout = int(self.config.get("tool_call_timeout", 30))
                 # 等待协程结束（实际等待时长为最慢的那个）
                 tool_results = []
 
-                for future, tool_call_data, tool_input in futures_with_data:
+                for future, tool_call_data, tool_input, tool_started_at in futures_with_data:
                     try:
                         result = future.result(timeout=tool_call_timeout)
+                        tool_ms = LatencyTracker.ms_since(tool_started_at)
+                        latency.add_counter("tool_total_ms", tool_ms)
+                        latency.add_counter("tool_count", 1)
+                        self.logger.bind(tag=TAG).info(
+                            "LATENCY event=tool_end trace={} name={} action={} ms={}",
+                            latency.trace_id,
+                            tool_call_data["name"],
+                            getattr(result.action, "name", result.action),
+                            tool_ms,
+                        )
                         tool_results.append((result, tool_call_data))
                         # 使用公共方法上报工具调用结果
                         enqueue_tool_report(self, tool_call_data['name'], tool_input, str(result.result) if result.result else None, report_tool_call=False)
 
                     except Exception as e:
+                        tool_ms = LatencyTracker.ms_since(tool_started_at)
+                        latency.add_counter("tool_total_ms", tool_ms)
+                        latency.add_counter("tool_count", 1)
                         self.logger.bind(tag=TAG).error(
                             f"工具调用超时或异常: {tool_call_data['name']}, 错误: {e}"
+                        )
+                        self.logger.bind(tag=TAG).info(
+                            "LATENCY event=tool_error trace={} name={} ms={}",
+                            latency.trace_id,
+                            tool_call_data["name"],
+                            tool_ms,
                         )
                         # 超时时返回错误响应，避免整个流程卡死
                         tool_results.append((
@@ -1357,6 +1457,14 @@ class ConnectionHandler:
             self.dialogue.put(Message(role="assistant", content=text_buff))
 
         if depth == 0:
+            if response_budget.truncated:
+                self.logger.bind(tag=TAG).info(
+                    "LATENCY event=response_truncated trace={} policy={} max_chars={} sent_chars={}",
+                    latency.trace_id,
+                    response_policy.name,
+                    response_policy.max_chars,
+                    response_budget.sent_chars,
+                )
             self.tts.tts_text_queue.put(
                 TTSMessageDTO(
                     sentence_id=current_sentence_id,
@@ -1370,6 +1478,7 @@ class ConnectionHandler:
                     self.dialogue.get_llm_dialogue(), indent=4, ensure_ascii=False
                 )
             )
+            self.logger.bind(tag=TAG).info("LATENCY event=chat_end {}", latency.summary())
 
         return True
 
@@ -1679,6 +1788,9 @@ class ConnectionHandler:
         self.client_voice_window.clear()
         self.last_is_voice = False
         self.vad_last_voice_time = 0.0
+        self.vad_first_voice_time = 0.0
+        self.vad_voice_stop_time = 0.0
+        self.vad_trace_id = None
 
         # Clear ASR buffers
         self.asr_audio.clear()

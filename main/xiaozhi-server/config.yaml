@@ -378,6 +378,21 @@ ASR:
     is_ssl: true
     api_key: none
     output_dir: tmp/
+  FunASRServer2Pass:
+    # 独立部署FunASR runtime 2-pass服务，启动方式同FunASRServer。
+    # 区别：该provider会在VAD检测到开始说话后立即建立WebSocket并转发PCM帧，
+    # 使用FunASR 2pass-offline最终结果触发后续LLM/TTS链路。
+    type: fun_server_2pass
+    host: 127.0.0.1
+    port: 10096
+    is_ssl: true
+    api_key: none
+    output_dir: tmp/
+    mode: 2pass
+    chunk_size: [5, 10, 5]
+    chunk_interval: 10
+    itn: false
+    recv_timeout: 8
   SherpaASR:
     # Sherpa-ONNX 本地语音识别（需手动下载模型）
     type: sherpa_onnx_local

@@ -1,4 +1,5 @@
 import json
+import time
 import httpx
 from config.logger import setup_logging
 from plugins_func.register import register_function, ToolType, ActionResponse, Action
@@ -48,9 +49,16 @@ async def search_from_ragflow(conn: "ConnectionHandler", question=None):
     payload = {"question": question, "dataset_ids": dataset_ids}
 
     try:
+        start_time = time.monotonic()
         # 使用ensure_ascii=False确保JSON序列化时正确处理中文
         async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0), verify=False) as client:
             response = await client.post(url, json=payload, headers=headers)
+        elapsed_ms = int((time.monotonic() - start_time) * 1000)
+        logger.bind(tag=TAG).info(
+            "LATENCY event=ragflow_retrieval dataset_count={} ms={}",
+            len(dataset_ids),
+            elapsed_ms,
+        )
 
         # 显式设置响应的编码为utf-8
         response.encoding = "utf-8"

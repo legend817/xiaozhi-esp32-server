@@ -1,5 +1,6 @@
 import time
 import os
+import uuid
 import numpy as np
 import onnxruntime
 from config.logger import setup_logging
@@ -103,13 +104,37 @@ class VADProvider(VADProviderBase):
                 )
 
                 # 如果之前有声音，但本次没有声音，且与上次有声音的时间差已经超过了静默阈值，则认为已经说完一句话
-                if conn.client_have_voice and not client_have_voice:
-                    stop_duration = time.time() * 1000 - conn.vad_last_voice_time
+                if (
+                    conn.client_have_voice
+                    and not client_have_voice
+                    and not conn.client_voice_stop
+                ):
+                    now_ms = time.time() * 1000
+                    stop_duration = now_ms - conn.vad_last_voice_time
                     if stop_duration >= self.silence_threshold_ms:
                         conn.client_voice_stop = True
+                        conn.vad_voice_stop_time = now_ms
+                        logger.bind(tag=TAG).info(
+                            "LATENCY event=vad_voice_stop trace={} silence_ms={} speech_ms={} buffered_frames={} buffered_bytes={}",
+                            getattr(conn, "vad_trace_id", None),
+                            int(stop_duration),
+                            int(now_ms - conn.vad_first_voice_time) if conn.vad_first_voice_time else None,
+                            len(getattr(conn, "asr_audio", []) or []),
+                            sum(len(frame) for frame in (getattr(conn, "asr_audio", []) or [])),
+                        )
                 if client_have_voice:
+                    now_ms = time.time() * 1000
+                    if not conn.client_have_voice:
+                        conn.vad_trace_id = uuid.uuid4().hex[:12]
+                        conn.vad_first_voice_time = now_ms
+                        logger.bind(tag=TAG).info(
+                            "LATENCY event=vad_first_voice trace={} threshold={} threshold_low={}",
+                            conn.vad_trace_id,
+                            self.vad_threshold,
+                            self.vad_threshold_low,
+                        )
                     conn.client_have_voice = True
-                    conn.vad_last_voice_time = time.time() * 1000
+                    conn.vad_last_voice_time = now_ms
 
             return client_have_voice
         except Exception as e:

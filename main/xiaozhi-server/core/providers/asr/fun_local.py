@@ -12,6 +12,7 @@ from typing import Optional, Tuple, List
 from core.providers.asr.utils import lang_tag_filter
 from core.providers.asr.base import ASRProviderBase
 from core.providers.asr.dto.dto import InterfaceType
+from core.utils.latency import LatencyTracker
 
 TAG = __name__
 logger = setup_logging()
@@ -80,7 +81,7 @@ class ASRProvider(ASRProviderBase):
                     return "", None
 
                 # 语音识别 - 使用线程池避免阻塞事件循环
-                start_time = time.time()
+                start_time = LatencyTracker.now()
                 result = await asyncio.to_thread(
                     self.model.generate,
                     input=artifacts.pcm_bytes,
@@ -89,9 +90,16 @@ class ASRProvider(ASRProviderBase):
                     use_itn=True,
                     batch_size_s=60,
                 )
+                elapsed_ms = LatencyTracker.ms_since(start_time)
                 text = lang_tag_filter(result[0]["text"])
                 logger.bind(tag=TAG).debug(
-                    f"语音识别耗时: {time.time() - start_time:.3f}s | 结果: {text['content']}"
+                    f"语音识别耗时: {elapsed_ms / 1000:.3f}s | 结果: {text['content']}"
+                )
+                logger.bind(tag=TAG).info(
+                    "LATENCY event=funasr_generate ms={} pcm_bytes={} text_len={}",
+                    elapsed_ms,
+                    len(artifacts.pcm_bytes),
+                    len(text.get("content") or ""),
                 )
 
                 return text, artifacts.file_path

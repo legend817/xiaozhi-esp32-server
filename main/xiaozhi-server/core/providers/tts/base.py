@@ -386,6 +386,7 @@ class TTSProviderBase(ABC):
                     self.tts_text_buff.append(message.content_detail)
                     segment_text = self._get_segment_text()
                     if segment_text:
+                        self._record_tts_segment_latency(segment_text)
                         self.to_tts_stream(segment_text, opus_handler=self.handle_opus)
                 elif ContentType.FILE == message.content_type:
                     self._process_remaining_text_stream(opus_handler=self.handle_opus)
@@ -455,11 +456,28 @@ class TTSProviderBase(ABC):
                     enqueue_audio.append(audio_datas)
 
                 # 发送音频
+                latency = getattr(self.conn, "current_latency", None)
+                if latency and audio_datas:
+                    if latency.mark_once("tts_first_audio"):
+                        logger.bind(tag=TAG).info(
+                            "LATENCY event=tts_first_audio trace={} ms={}",
+                            latency.trace_id,
+                            latency.since_ms("chat_start", "tts_first_audio"),
+                        )
                 future = asyncio.run_coroutine_threadsafe(
                     sendAudioMessage(self.conn, sentence_type, audio_datas, text, sentence_id),
                     self.conn.loop,
                 )
                 future.result()
+                if latency and sentence_type == SentenceType.LAST:
+                    latency.mark("tts_end")
+                    logger.bind(tag=TAG).info(
+                        "LATENCY event=tts_end {} tts_segment_total_ms={}",
+                        latency.summary(),
+                        latency.since_ms("tts_first_segment", "tts_end"),
+                    )
+                    if getattr(self.conn, "current_latency", None) is latency:
+                        self.conn.current_latency = None
 
                 # 记录输出和报告
                 if self.conn.max_output_size > 0 and text:
@@ -562,10 +580,34 @@ class TTSProviderBase(ABC):
         if remaining_text:
             segment_text = textUtils.get_string_no_punctuation_or_emoji(remaining_text)
             if segment_text:
+                self._record_tts_segment_latency(segment_text)
                 self.to_tts_stream(segment_text, opus_handler=opus_handler)
                 self.processed_chars += len(full_text)
                 return True
         return False
+
+    def _record_tts_segment_latency(self, segment_text):
+        latency = getattr(self.conn, "current_latency", None)
+        if not latency:
+            return
+        segment_chars = len(segment_text or "")
+        latency.add_counter("tts_segments", 1)
+        latency.add_counter("tts_chars", segment_chars)
+        logger.bind(tag=TAG).info(
+            "LATENCY event=tts_segment trace={} index={} chars={} total_chars={}",
+            latency.trace_id,
+            latency.counters.get("tts_segments"),
+            segment_chars,
+            latency.counters.get("tts_chars"),
+        )
+        if latency.mark_once("tts_first_segment"):
+            latency.set_value("tts_first_segment_chars", segment_chars)
+            logger.bind(tag=TAG).info(
+                "LATENCY event=tts_first_segment trace={} ms={} chars={}",
+                latency.trace_id,
+                latency.since_ms("chat_start", "tts_first_segment"),
+                segment_chars,
+            )
 
     def _apply_percentage_params(self, config):
         """根据子类定义的 TTS_PARAM_CONFIG 批量应用百分比参数"""

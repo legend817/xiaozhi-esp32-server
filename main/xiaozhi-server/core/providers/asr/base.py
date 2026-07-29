@@ -18,6 +18,7 @@ from core.handle.receiveAudioHandle import startToChat
 from core.handle.reportHandle import enqueue_asr_report
 from core.utils.util import remove_punctuation_and_length
 from core.handle.receiveAudioHandle import handleAudioMessage
+from core.utils.latency import LatencyTracker
 from typing import Optional, Tuple, List, NamedTuple, TYPE_CHECKING
 
 
@@ -85,6 +86,17 @@ class ASRProviderBase(ABC):
         """并行处理ASR和声纹识别"""
         try:
             total_start_time = time.monotonic()
+            asr_trace_id = getattr(conn, "vad_trace_id", None) or uuid.uuid4().hex[:12]
+            pcm_bytes_total = sum(len(frame) for frame in asr_audio_task)
+            logger.bind(tag=TAG).info(
+                "LATENCY event=asr_start trace={} frames={} pcm_bytes={} vad_to_asr_ms={}",
+                asr_trace_id,
+                len(asr_audio_task),
+                pcm_bytes_total,
+                int(time.time() * 1000 - conn.vad_voice_stop_time)
+                if getattr(conn, "vad_voice_stop_time", 0.0)
+                else None,
+            )
 
             # 数据已经是PCM直接使用
             pcm_data = asr_audio_task
@@ -111,6 +123,7 @@ class ASRProviderBase(ABC):
             else:
                 asr_result = await asr_task
                 voiceprint_result = None
+            asr_elapsed_ms = LatencyTracker.ms_since(total_start_time)
 
             # 记录识别结果 - 检查是否为异常
             if isinstance(asr_result, Exception):
@@ -158,6 +171,13 @@ class ASRProviderBase(ABC):
             # 性能监控
             total_time = time.monotonic() - total_start_time
             logger.bind(tag=TAG).debug(f"总处理耗时: {total_time:.3f}s")
+            logger.bind(tag=TAG).info(
+                "LATENCY event=asr_end trace={} ms={} text_len={} voiceprint={}",
+                asr_trace_id,
+                asr_elapsed_ms,
+                len(content_for_length_check or ""),
+                bool(speaker_name),
+            )
 
             # 检查文本长度
             text_len, _ = remove_punctuation_and_length(content_for_length_check)

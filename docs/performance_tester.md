@@ -1,5 +1,7 @@
 # 语音识别、大语言模型、非流式语音合成、流式语音合成、视觉模型的性能测试工具使用指南
 
+项目级的指标定义、优化顺序、验收门禁和交接规范，请先阅读[语音链路低延迟开发与优化计划](latency-optimization-plan.md)。每次性能改动使用[性能基线记录模板](performance-baseline-template.md)保存可复现结果。
+
 1.在main/xiaozhi-server目录下创建data目录
 2.在data目录下创建.config.yaml文件
 3.在.data/config.yaml中，写入你的语音识别、大语言模型、流式语音合成、视觉模型的参数

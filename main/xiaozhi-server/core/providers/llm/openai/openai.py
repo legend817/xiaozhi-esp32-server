@@ -3,6 +3,7 @@ import openai
 from openai.types import CompletionUsage
 from config.logger import setup_logging
 from core.utils.util import check_model_key
+from core.utils.latency import LatencyTracker
 from core.providers.llm.base import LLMProviderBase
 from urllib.parse import urlparse
 
@@ -112,7 +113,18 @@ class LLMProvider(LLMProviderBase):
         # 禁用思考模式
         self._apply_thinking_disabled(request_params)
 
+        start_time = LatencyTracker.now()
+        logger.bind(tag=TAG).info(
+            "LATENCY event=llm_request_start provider=openai model={} tools=false messages={}",
+            self.model_name,
+            len(dialogue),
+        )
         responses = self.client.chat.completions.create(**request_params)
+        logger.bind(tag=TAG).info(
+            "LATENCY event=llm_stream_open provider=openai model={} tools=false ms={}",
+            self.model_name,
+            LatencyTracker.ms_since(start_time),
+        )
 
         is_active = True
         try:            
@@ -158,7 +170,19 @@ class LLMProvider(LLMProviderBase):
         # 禁用思考模式
         self._apply_thinking_disabled(request_params)
 
+        start_time = LatencyTracker.now()
+        logger.bind(tag=TAG).info(
+            "LATENCY event=llm_request_start provider=openai model={} tools=true messages={} tool_count={}",
+            self.model_name,
+            len(dialogue),
+            len(functions or []),
+        )
         stream = self.client.chat.completions.create(**request_params)
+        logger.bind(tag=TAG).info(
+            "LATENCY event=llm_stream_open provider=openai model={} tools=true ms={}",
+            self.model_name,
+            LatencyTracker.ms_since(start_time),
+        )
 
         try:
             for chunk in stream:

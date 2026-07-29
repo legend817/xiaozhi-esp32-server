@@ -1,7 +1,14 @@
-# 生产镜像，仅包含应用代码
-FROM ghcr.io/xinnan-tech/xiaozhi-esp32-server:server-base
+# 生产/开发源码镜像，仅包含服务端应用代码
+ARG SERVER_BASE_IMAGE=ghcr.io/xinnan-tech/xiaozhi-esp32-server:server-base
+FROM ${SERVER_BASE_IMAGE}
 
-COPY main/xiaozhi-server .
+ARG SOURCE_REVISION=unknown
+LABEL org.opencontainers.image.source="local-workspace" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}"
+
+ENV XIAOZHI_SOURCE_REVISION="${SOURCE_REVISION}"
+
+COPY main/xiaozhi-server/ .
 
 # 启动应用
 CMD ["python", "app.py"]

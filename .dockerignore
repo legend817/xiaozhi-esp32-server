@@ -5,3 +5,22 @@ __pycache__
 Dockerfile
 tmp/
 data/
+
+# Local deployment state. This can contain database files, uploaded files,
+# local configs, and model artifacts; do not send it to the Docker build context.
+deploy/
+
+# Modules that are not copied by Dockerfile-server.
+main/manager-api/
+main/manager-web/
+main/manager-mobile/
+main/digital-human/
+
+# Common local/generated files.
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+*.tmp
+node_modules/

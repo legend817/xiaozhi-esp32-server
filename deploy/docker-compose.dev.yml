@@ -1,0 +1,23 @@
+# Local source-build overlay for the server container.
+#
+# Usage:
+#   XIAOZHI_DEV_TAG="$(git rev-parse --short HEAD)-dev" \
+#   docker compose -f deploy/docker-compose_all.yml -f deploy/docker-compose.dev.yml build xiaozhi-esp32-server
+#
+#   docker compose -f deploy/docker-compose_all.yml -f deploy/docker-compose.dev.yml up -d --no-deps --force-recreate xiaozhi-esp32-server
+services:
+  xiaozhi-esp32-server:
+    image: xiaozhi-esp32-server:${XIAOZHI_DEV_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: Dockerfile-server
+      args:
+        SOURCE_REVISION: ${XIAOZHI_DEV_TAG:-dev}
+        SERVER_BASE_IMAGE: ${XIAOZHI_SERVER_BASE_IMAGE:-ghcr.io/xinnan-tech/xiaozhi-esp32-server:server-base}
+      labels:
+        org.opencontainers.image.source: local-workspace
+        org.opencontainers.image.revision: ${XIAOZHI_DEV_TAG:-dev}
+    environment:
+      - TZ=Asia/Shanghai
+      - XIAOZHI_SOURCE_REVISION=${XIAOZHI_DEV_TAG:-dev}
+      - PYTHONUNBUFFERED=1
