@@ -1,6 +1,7 @@
 """服务端插件工具执行器"""
 
 import asyncio
+import json
 from typing import Dict, Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -57,14 +58,26 @@ class ServerPluginExecutor(ToolExecutor):
     def get_tools(self) -> Dict[str, ToolDefinition]:
         """获取所有注册的服务端插件工具"""
         tools = {}
+        plugin_configs = self._get_plugin_configs()
 
         # 获取必要的函数
         necessary_functions = ["handle_exit_intent", "get_lunar"]
 
-        # 获取配置中的函数
-        config_functions = self.config["Intent"][
-            self.config["selected_module"]["Intent"]
-        ].get("functions", [])
+        intent_type = (
+            self.config.get("Intent", {})
+            .get(self.config.get("selected_module", {}).get("Intent"), {})
+            .get("type")
+        )
+
+        # lightweight_router 不再使用 Intent.functions 白名单。
+        # 可用工具只来自智能体已绑定插件，是否本轮挂载由 tool_router.py 决定。
+        if intent_type == "lightweight_router":
+            config_functions = []
+        else:
+            # 获取配置中的函数，保留原 function_call/intent_llm 配置文件兼容行为
+            config_functions = self.config["Intent"][
+                self.config["selected_module"]["Intent"]
+            ].get("functions", [])
 
         # 转换为列表
         if not isinstance(config_functions, list):
@@ -73,12 +86,11 @@ class ServerPluginExecutor(ToolExecutor):
             except TypeError:
                 config_functions = []
 
-        # 管理端可能在 lightweight_router 下仅下发 plugins 配置，不下发 Intent.functions。
-        # 这里把 plugins 中已配置且已注册的插件也纳入可用工具池，
-        # 后续由轻量路由决定本轮是否真正挂给 LLM。
+        # 管理端下发的智能体绑定插件也纳入可用工具池。
+        # lightweight_router 模式下，最终是否挂给 LLM 由轻量路由决定。
         configured_plugin_functions = [
             name
-            for name in (self.config.get("plugins") or {}).keys()
+            for name in plugin_configs.keys()
             if name in all_function_registry
         ]
 
@@ -92,7 +104,7 @@ class ServerPluginExecutor(ToolExecutor):
             if func_item:
                 # 从函数注册中获取描述
                 fun_description = (
-                    self.config.get("plugins", {})
+                    plugin_configs
                     .get(func_name, {})
                     .get("description", "")
                 )
@@ -120,10 +132,28 @@ class ServerPluginExecutor(ToolExecutor):
         """检查是否有指定的服务端插件工具"""
         return tool_name in all_function_registry
 
+    def _get_plugin_configs(self) -> Dict[str, Dict[str, Any]]:
+        """返回智能体已绑定插件配置，兼容管理端下发的JSON字符串参数。"""
+        plugins = self.config.get("plugins") or {}
+        result = {}
+        for name, plugin_config in plugins.items():
+            if isinstance(plugin_config, dict):
+                result[name] = plugin_config
+                continue
+            if isinstance(plugin_config, str):
+                try:
+                    parsed = json.loads(plugin_config)
+                except json.JSONDecodeError:
+                    parsed = {}
+                result[name] = parsed if isinstance(parsed, dict) else {}
+                continue
+            result[name] = {}
+        return result
+
     def _init_news_source_description(self, func_item, func_name):
         """根据连接配置初始化新闻工具的参数描述"""
         news_sources = (
-            self.config.get("plugins", {})
+            self._get_plugin_configs()
             .get(func_name, {})
             .get("news_sources", "")
         )

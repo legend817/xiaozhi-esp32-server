@@ -259,14 +259,9 @@ Intent:
   lightweight_router:
     # 不需要动type
     type: lightweight_router
-    # plugins_func/functions下的模块，可以通过配置，选择加载哪个模块，加载后对话支持轻量工具路由
-    # 普通聊天不会挂载工具；只有天气、新闻、音乐、设备控制、RAG等明确命中规则时才挂载少量工具
-    functions:
-      - web_search
-      - get_weather
-      - get_news_from_newsnow
-      - play_music
-      # - search_from_ragflow
+    # 轻量工具路由不配置函数白名单。
+    # 可用工具来自智能体已绑定插件；普通聊天不会挂载工具；
+    # 只有天气、新闻、音乐、设备控制、RAG等明确命中tool_router.py规则时才挂载少量工具。
   intent_llm:
     # 不需要动type
     type: intent_llm
