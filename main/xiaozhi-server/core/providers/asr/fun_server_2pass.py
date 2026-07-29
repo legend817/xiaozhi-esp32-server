@@ -10,6 +10,11 @@ from core.providers.asr.base import ASRProviderBase
 from core.providers.asr.utils import lang_tag_filter
 from core.providers.asr.dto.dto import InterfaceType
 from core.utils.latency import LatencyTracker
+from core.utils.asr_text import (
+    apply_text_corrections,
+    build_hotwords_message,
+    build_text_corrections,
+)
 
 if TYPE_CHECKING:
     from core.connection import ConnectionHandler
@@ -55,6 +60,12 @@ class ASRProvider(ASRProviderBase):
         self.chunk_interval = int(config.get("chunk_interval", 10))
         self.itn = str(config.get("itn", False)).lower() in ("true", "1", "yes")
         self.recv_timeout = float(config.get("recv_timeout", 8))
+        self.hotwords_message, self.hotword_count = build_hotwords_message(
+            config.get("hotwords")
+        )
+        self.text_corrections = build_text_corrections(
+            config.get("text_corrections")
+        )
 
         self.asr_ws = None
         self.forward_task = None
@@ -126,15 +137,19 @@ class ASRProvider(ASRProviderBase):
             "is_speaking": True,
             "itn": self.itn,
         }
+        if self.hotwords_message:
+            config_message["hotwords"] = self.hotwords_message
         await self.asr_ws.send(json.dumps(config_message, ensure_ascii=False))
         self.server_ready = True
         logger.bind(tag=TAG).info(
-            "LATENCY event=funasr_2pass_start trace={} uri={} mode={} chunk_size={} interval={}",
+            "LATENCY event=funasr_2pass_start trace={} uri={} mode={} chunk_size={} interval={} hotword_count={} correction_count={}",
             getattr(conn, "vad_trace_id", None),
             self.uri,
             self.mode,
             self.chunk_size,
             self.chunk_interval,
+            self.hotword_count,
+            len(self.text_corrections),
         )
         self.forward_task = asyncio.create_task(self._forward_results(conn))
 
@@ -226,7 +241,11 @@ class ASRProvider(ASRProviderBase):
     async def speech_to_text(
         self, opus_data: List[bytes], session_id: str, artifacts=None
     ) -> Tuple[Optional[str], Optional[str]]:
-        result = self.text
+        result = apply_text_corrections(self.text, self.text_corrections)
+        if result != self.text:
+            logger.bind(tag=TAG).info(
+                "LATENCY event=funasr_text_correction replacements_applied=true"
+            )
         self.text = ""
         return lang_tag_filter(result), None
 

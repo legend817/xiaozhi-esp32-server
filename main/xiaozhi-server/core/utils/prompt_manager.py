@@ -11,6 +11,7 @@ from typing import Dict, Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from core.connection import ConnectionHandler
 from config.logger import setup_logging
+from core.utils.context_prefetch import is_weather_context_configured
 from jinja2 import Template
 
 TAG = __name__
@@ -48,8 +49,6 @@ EMOJI_List = [
     "😜",
     "🙄",
 ]
-
-
 class PromptManager:
     """系统提示词管理器，负责管理和更新系统提示词"""
 
@@ -166,6 +165,9 @@ class PromptManager:
     def _get_weather_info(self, conn: "ConnectionHandler", location: str) -> str:
         """获取天气信息"""
         try:
+            if not is_weather_context_configured(conn.config):
+                return ""
+
             # 先从缓存获取
             cached_weather = self.cache_manager.get(self.CacheType.WEATHER, location)
             if cached_weather is not None:
@@ -212,6 +214,7 @@ class PromptManager:
         """同步更新上下文信息"""
         try:
             local_address = ""
+            weather_context_enabled = is_weather_context_configured(conn.config)
             if (
                 client_ip
                 and self.base_prompt_template
@@ -224,12 +227,17 @@ class PromptManager:
                 local_address = self._get_location_info(client_ip)
 
             if (
-                self.base_prompt_template
+                weather_context_enabled
+                and self.base_prompt_template
                 and "weather_info" in self.base_prompt_template
                 and local_address
             ):
                 # 获取天气信息（使用全局缓存）
                 self._get_weather_info(conn, local_address)
+            elif self.base_prompt_template and "weather_info" in self.base_prompt_template:
+                self.logger.bind(tag=TAG).debug(
+                    "当前智能体未显式配置天气插件，跳过天气上下文预取"
+                )
 
             # 获取配置的上下文数据
             if hasattr(conn, "device_id") and conn.device_id:

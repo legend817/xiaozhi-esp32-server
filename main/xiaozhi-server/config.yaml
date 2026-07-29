@@ -171,6 +171,17 @@ plugins:
     api_key: "ragflow-xxx"
     # ragflow知识库id
     dataset_ids: ["123456789"]
+    # 语音问答优先低延迟：默认只取少量高相关分片，可按知识库质量调整
+    page_size: 3
+    top_k: 16
+    similarity_threshold: 0.3
+    # 短人名精确问句专用阈值；返回结果还必须包含该姓名
+    entity_fallback_threshold: 0.18
+    max_context_chunks: 3
+    max_context_chars: 2200
+    # RAGFlow检索上下文缓存；高频重复问题可省掉一次RAGFlow请求
+    cache_enabled: true
+    cache_ttl: 600
   # 联网搜索插件配置
   # 支持秘塔(metaso)和Tavily两个搜索源
   # 秘塔API Key申请：https://metaso.cn/search-api/api-keys
@@ -400,6 +411,10 @@ ASR:
     chunk_interval: 10
     itn: false
     recv_timeout: 8
+    # FunASR WebSocket 会话热词，格式为“词: 权重”。生产环境按企业专名维护。
+    hotwords: {}
+    # 最终识别文本的确定性兜底纠错，格式为“错误写法: 正确写法”。
+    text_corrections: {}
   SherpaASR:
     # Sherpa-ONNX 本地语音识别（需手动下载模型）
     type: sherpa_onnx_local
@@ -631,6 +646,7 @@ VAD:
     threshold_low: 0.3
     model_dir: models/snakers4_silero-vad
     min_silence_duration_ms: 200  # 如果说话停顿比较长，可以把这个值设置大一些
+    incomplete_silence_duration_ms: 900  # 2-pass partial明显未说完时延长句尾等待
 
 LLM:
   # 所有openai类型均可以修改超参，以AliLLM为例

@@ -62,6 +62,7 @@
 | `time_lunar` | 农历、节气、生肖、宜忌 | `get_lunar` |
 | `news` | 新闻、热搜、头条 | `get_news_from_newsnow` 或 `get_news_from_chinanews` |
 | `enterprise_rag` | 公司、产品、价格、合作、案例等企业信息 | `search_from_ragflow` |
+| `enterprise_rag_probe` | 知识库描述包含人员范围时的短人名问句 | `search_from_ragflow`；无命中直接安全拒答 |
 | `web_search` | 明确要求联网搜索 | `web_search` |
 
 如果对应工具没有被管理端配置或设备 MCP 未上报，则自动退回 `direct_llm`。
@@ -133,6 +134,8 @@ LATENCY event=tts_first_audio ms=685
     1. 在管理端给智能体绑定插件并配置参数；
     2. 在 `tool_router.py` 增加明确路由规则；
     3. 必要时在 `connection.py` 增加确定性执行分支。
+11. 企业名称从智能体绑定的 `search_from_ragflow` 插件描述中动态提取；新增企业知识库时应在描述中保留清晰的企业名称，不需要把企业名硬编码到路由器。
+12. RAG 没有召回 chunk 时直接回复“知识库里暂时没有这项信息”，不再交给 LLM 补写，避免幻觉并减少一次生成耗时。
 
 ## 企业 RAG 确定性执行 v1
 
@@ -162,3 +165,104 @@ LATENCY event=tts_first_audio ms=2602
 - RAGFlow 返回上下文从默认约 30 个 chunk 收敛到 3 个 chunk；
 - LLM 二次总结输入明显减少；
 - 企业信息问答当前不需要 staged RAG，先直接等 RAG 返回后回答。
+
+## RAGFlow 上下文缓存 v1
+
+对高频企业问题，`search_from_ragflow` 会先检查进程内缓存：
+
+```text
+LATENCY event=ragflow_cache hit=true key=...
+```
+
+缓存命中后直接把上次的 RAGFlow 上下文交给 LLM，总体链路仍是：
+
+```text
+tool_router.py 判断 enterprise_rag
+  ↓
+search_from_ragflow 命中缓存
+  ↓
+LLM 根据缓存上下文生成答案
+  ↓
+TTS 播放
+```
+
+缓存键包含：
+
+- 归一化后的用户问题
+- RAGFlow `base_url`
+- `dataset_ids`
+- `page_size`
+- `top_k`
+- `similarity_threshold`
+- `max_context_chunks`
+- `max_context_chars`
+
+默认参数：
+
+```yaml
+cache_enabled: true
+cache_ttl: 600
+```
+
+注意：
+
+- 这是 RAGFlow 上下文缓存，不是最终答案缓存；
+- 修改知识库后，最多可能有 `cache_ttl` 秒旧上下文窗口；
+- 如果知识库更新频繁，把 `cache_ttl` 调短或临时设置 `cache_enabled: false`。
+
+2026-07-29 回测：
+
+```text
+冷缓存:
+LATENCY event=ragflow_cache hit=false
+LATENCY event=ragflow_retrieval ms=1027
+LATENCY event=chat_end total_ms=2489
+LATENCY event=tts_first_audio ms=2527
+
+热缓存:
+LATENCY event=ragflow_cache hit=true
+LATENCY event=tool_end name=search_from_ragflow ms=6
+LATENCY event=chat_end total_ms=1114
+LATENCY event=tts_first_audio ms=1196
+```
+
+## Q&A 别名去重 v1
+
+企业 Q&A v3 使用“一种问法一行”的结构提高精确召回，同一标准答案会对应多个问法。RAGFlow 可能一次返回同一答案的多个别名，因此服务端在限制上下文之前按“回答正文”去重：
+
+```text
+RAGFlow 返回多个 chunk
+  ↓
+提取“回答：”之后的正文作为去重键
+  ↓
+移除重复答案
+  ↓
+再应用 max_context_chunks / max_context_chars
+```
+
+日志新增 `duplicate_answers`：
+
+```text
+LATENCY event=ragflow_context chunks=3 selected_chunks=2 duplicate_answers=1 ...
+```
+
+非 Q&A 文档没有“回答：”标记时，仍按完整正文去重，不影响普通知识文档。相关实现和回归测试：
+
+- `core/utils/rag_context.py`
+- `tests/test_rag_context.py`
+
+## 人名检索与输出安全 v1
+
+- 普通 RAG 仍使用 `similarity_threshold=0.3`；
+- 只有“某某是谁/是什么人/做什么的”等严格短人名问句使用 `entity_fallback_threshold=0.18`；
+- 低阈值结果必须逐字包含查询姓名，否则视为无命中；
+- 无命中直接回复企业知识库没有该人员资料，不让 LLM 猜测；
+- 轻量路由只在知识库描述明确包含“人员/团队/员工/专家/科学家”范围时启用人名探测；
+- LLM 即使把工具调用 JSON 当普通文字输出，也会从 `{`/`<` 前缀开始缓冲，确认是工具调用后整段禁止进入 TTS。
+
+默认配置：
+
+```yaml
+similarity_threshold: 0.3
+entity_fallback_threshold: 0.18
+```

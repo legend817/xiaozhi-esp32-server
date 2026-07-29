@@ -11,6 +11,7 @@ from core.http_server import SimpleHttpServer
 from core.websocket_server import WebSocketServer
 from core.utils.util import check_ffmpeg_installed
 from core.utils.gc_manager import get_gc_manager
+from core.utils.ragflow_http import ragflow_http_client_pool
 
 TAG = __name__
 logger = setup_logging()
@@ -146,6 +147,7 @@ async def main():
             timeout=3.0,
             return_when=asyncio.ALL_COMPLETED,
         )
+        await ragflow_http_client_pool.close_all()
         print("服务器已关闭，程序退出。")
 
 

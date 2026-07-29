@@ -1,5 +1,8 @@
 from dataclasses import dataclass
+import re
 from typing import Iterable, List, Optional, Set
+
+from core.utils.rag_context import extract_entity_query_term
 
 
 @dataclass(frozen=True)
@@ -25,7 +28,46 @@ def _available_prefixed(available_tools: Set[str], prefixes: Iterable[str]) -> L
     return result
 
 
-def build_tool_route(query: Optional[str], available_tool_names: Iterable[str]) -> ToolRoute:
+def _enterprise_subject_hints(description: Optional[str]) -> List[str]:
+    """Extract stable organization names from the configured RAG description."""
+
+    if not description:
+        return []
+    names = re.findall(r"【([^】]+)】", description)
+    hints = []
+    removable_suffixes = (
+        "知识库",
+        "公司信息",
+        "企业信息",
+        "集团信息",
+        "信息",
+        "资料",
+        "介绍",
+        "公司",
+        "企业",
+        "集团",
+    )
+    for name_group in names:
+        for raw_name in re.split(r"[,，、]", name_group):
+            name = re.sub(r"[_-](?:qa|v)[\w.-]*$", "", raw_name.strip().lower())
+            changed = True
+            while changed and name:
+                changed = False
+                for suffix in removable_suffixes:
+                    if name.endswith(suffix) and len(name) > len(suffix) + 1:
+                        name = name[: -len(suffix)]
+                        changed = True
+                        break
+            if len(name) >= 2 and name not in hints:
+                hints.append(name)
+    return hints
+
+
+def build_tool_route(
+    query: Optional[str],
+    available_tool_names: Iterable[str],
+    enterprise_rag_description: Optional[str] = None,
+) -> ToolRoute:
     """Select the smallest useful tool set for the current user query.
 
     This is intentionally deterministic and conservative:
@@ -96,6 +138,70 @@ def build_tool_route(query: Optional[str], available_tool_names: Iterable[str]) 
         )
 
     # 企业知识库类。当前只在 search_from_ragflow 已启用时触发。
+    enterprise_subject_keywords = ["公司", "企业", "你们", "我们", "集团"]
+    configured_subject_hints = _enterprise_subject_hints(enterprise_rag_description)
+    if configured_subject_hints and _contains_any(text, configured_subject_hints):
+        return pick(
+            "enterprise_rag",
+            ["search_from_ragflow"],
+            "matched_configured_enterprise_subject",
+        )
+
+    enterprise_contact_keywords = [
+        "电话",
+        "手机号",
+        "手机号码",
+        "联系方式",
+        "联系电话",
+        "联系你们",
+        "怎么联系",
+        "地址",
+        "官网",
+    ]
+    if _contains_any(text, enterprise_subject_keywords) and _contains_any(
+        text, enterprise_contact_keywords
+    ):
+        return pick(
+            "enterprise_rag",
+            ["search_from_ragflow"],
+            "matched_enterprise_contact_keywords",
+        )
+
+    enterprise_information_keywords = [
+        "做什么",
+        "主营",
+        "业务",
+        "成立",
+        "注册",
+        "发展",
+        "目标",
+        "团队",
+        "人员",
+        "负责人",
+        "创始人",
+        "法人",
+        "法定代表人",
+        "ceo",
+        "科学家",
+        "教授",
+        "博士",
+        "临床",
+        "试点",
+        "中心",
+        "实验室",
+        "检测",
+        "认证",
+        "营业时间",
+    ]
+    if _contains_any(text, enterprise_subject_keywords) and _contains_any(
+        text, enterprise_information_keywords
+    ):
+        return pick(
+            "enterprise_rag",
+            ["search_from_ragflow"],
+            "matched_enterprise_information_keywords",
+        )
+
     enterprise_keywords = [
         "你们公司",
         "公司是做什么",
@@ -107,7 +213,10 @@ def build_tool_route(query: Optional[str], available_tool_names: Iterable[str]) 
         "方案",
         "服务",
         "联系方式",
+        "联系电话",
         "联系你们",
+        "公司电话",
+        "企业电话",
         "合作",
         "资质",
         "案例",
@@ -117,6 +226,18 @@ def build_tool_route(query: Optional[str], available_tool_names: Iterable[str]) 
     ]
     if _contains_any(text, enterprise_keywords):
         return pick("enterprise_rag", ["search_from_ragflow"], "matched_enterprise_keywords")
+
+    # 人名类企业资料无法仅靠企业名称命中。仅当知识库描述明确包含
+    # 人员/团队资料时做一次低风险探测；无召回时由连接层回退普通 LLM。
+    description_text = (enterprise_rag_description or "").lower()
+    if extract_entity_query_term(text) and _contains_any(
+        description_text, ["人员", "团队", "员工", "专家", "科学家"]
+    ):
+        return pick(
+            "enterprise_rag_probe",
+            ["search_from_ragflow"],
+            "matched_enterprise_entity_probe",
+        )
 
     # 明确要求联网搜索时才启用搜索。
     if _contains_any(text, ["搜索", "查一下", "网上", "联网", "最新", "资料"]):

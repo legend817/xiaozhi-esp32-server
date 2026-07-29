@@ -10,5 +10,9 @@ ENV XIAOZHI_SOURCE_REVISION="${SOURCE_REVISION}"
 
 COPY main/xiaozhi-server/ .
 
+# The source/base image may contain this path as a directory. The deployment
+# compose mounts a model file here, so remove the stale directory after copy.
+RUN rm -rf /opt/xiaozhi-esp32-server/models/SenseVoiceSmall/model.pt
+
 # 启动应用
 CMD ["python", "app.py"]

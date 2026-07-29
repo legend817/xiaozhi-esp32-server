@@ -46,7 +46,11 @@ from core.utils.voiceprint_provider import VoiceprintProvider
 from core.utils.util import get_system_error_response
 from core.utils import textUtils
 from core.utils.latency import LatencyTracker
-from core.utils.response_policy import ResponseBudget, build_response_policy
+from core.utils.response_policy import (
+    ResponseBudget,
+    StreamingTextSegmenter,
+    build_response_policy,
+)
 from core.utils.tool_router import build_tool_route
 
 
@@ -1060,7 +1064,12 @@ class ConnectionHandler:
             for item in all_functions
             if item.get("function", {}).get("name")
         ]
-        route = build_tool_route(query, available_names)
+        ragflow_description = (
+            self.config.get("plugins", {})
+            .get("search_from_ragflow", {})
+            .get("description", "")
+        )
+        route = build_tool_route(query, available_names, ragflow_description)
         selected_names = set(route.tool_names)
         if not selected_names:
             self.logger.bind(tag=TAG).info(
@@ -1168,14 +1177,7 @@ class ConnectionHandler:
     def _finish_deterministic_reply(
         self, current_sentence_id, latency, response_policy, text
     ):
-        self.tts.tts_text_queue.put(
-            TTSMessageDTO(
-                sentence_id=current_sentence_id,
-                sentence_type=SentenceType.MIDDLE,
-                content_type=ContentType.TEXT,
-                content_detail=text,
-            )
-        )
+        self._enqueue_tts_text_segments(current_sentence_id, text)
         self.tts.store_tts_text(current_sentence_id, text)
         self.dialogue.put(Message(role="assistant", content=text))
         self.tts.tts_text_queue.put(
@@ -1190,6 +1192,34 @@ class ConnectionHandler:
             "LATENCY event=chat_end {}", latency.summary()
         )
         return True
+
+    def _enqueue_tts_text_segments(self, sentence_id, text):
+        self._enqueue_tts_segments(sentence_id, self._split_tts_text_segments(text))
+
+    def _enqueue_tts_segments(self, sentence_id, segments):
+        latency = getattr(self, "current_latency", None)
+        for segment in segments:
+            if latency:
+                latency.add_counter("tts_text_segments", 1)
+                latency.add_counter("tts_text_chars", len(segment or ""))
+                self.logger.bind(tag=TAG).info(
+                    "LATENCY event=tts_text_segment trace={} index={} chars={}",
+                    latency.trace_id,
+                    latency.counters.get("tts_text_segments"),
+                    len(segment or ""),
+                )
+            self.tts.tts_text_queue.put(
+                TTSMessageDTO(
+                    sentence_id=sentence_id,
+                    sentence_type=SentenceType.MIDDLE,
+                    content_type=ContentType.TEXT,
+                    content_detail=segment,
+                )
+            )
+
+    def _split_tts_text_segments(self, text):
+        segmenter = StreamingTextSegmenter()
+        return segmenter.accept(text) + segmenter.flush()
 
     def _handle_deterministic_device_route(
         self, query, route, current_sentence_id, latency, response_policy
@@ -1308,7 +1338,7 @@ class ConnectionHandler:
     ):
         if (
             route is None
-            or route.name != "enterprise_rag"
+            or route.name not in {"enterprise_rag", "enterprise_rag_probe"}
             or "search_from_ragflow" not in set(route.tool_names or [])
             or not self.func_handler.has_tool("search_from_ragflow")
         ):
@@ -1325,7 +1355,24 @@ class ConnectionHandler:
             latency,
             return_tool_call=True,
         )
-        self._handle_function_result([(result, tool_call_data)], depth=0)
+        if (
+            route.name == "enterprise_rag_probe"
+            and result.action == Action.RESPONSE
+            and result.response == "知识库里暂时没有这项信息。"
+        ):
+            self.logger.bind(tag=TAG).info(
+                "LATENCY event=ragflow_entity_probe_fallback trace={} reason=no_context",
+                latency.trace_id,
+            )
+            return self._finish_deterministic_reply(
+                current_sentence_id,
+                latency,
+                response_policy,
+                "企业知识库里暂时没有这位人员的信息。",
+            )
+        self._handle_function_result(
+            [(result, tool_call_data)], depth=0, response_policy=response_policy
+        )
         self.tts.tts_text_queue.put(
             TTSMessageDTO(
                 sentence_id=current_sentence_id,
@@ -1360,7 +1407,7 @@ class ConnectionHandler:
             dialogue.insert(0, {"role": "system", "content": policy_prompt})
         return dialogue
 
-    def chat(self, query, depth=0):
+    def chat(self, query, depth=0, response_policy=None):
         # 保存当前任务的sentence_id到局部变量，避免被新任务覆盖
         current_sentence_id = None
         latency = None
@@ -1413,8 +1460,17 @@ class ConnectionHandler:
                 )
             )
 
+        # Define turn tools. In lightweight_router mode this uses the lightweight router;
+        # in function_call mode it preserves the original full-tool behavior.
+        functions, tool_route = self._select_routed_functions(
+            query, depth, force_final_answer, latency
+        )
         response_message = []
-        response_policy = build_response_policy(query if depth == 0 else None)
+        if response_policy is None:
+            response_policy = build_response_policy(
+                query if depth == 0 else None,
+                tool_route.name if tool_route is not None else None,
+            )
         response_budget = ResponseBudget(response_policy)
         if depth == 0:
             self.logger.bind(tag=TAG).info(
@@ -1424,12 +1480,6 @@ class ConnectionHandler:
                 response_policy.max_chars,
                 bool(response_policy.suffix),
             )
-
-        # Define turn tools. In lightweight_router mode this uses the lightweight router;
-        # in function_call mode it preserves the original full-tool behavior.
-        functions, tool_route = self._select_routed_functions(
-            query, depth, force_final_answer, latency
-        )
         if (
             depth == 0
             and tool_route is not None
@@ -1438,14 +1488,14 @@ class ConnectionHandler:
             )
         ):
             return True
-        if (
-            depth == 0
-            and tool_route is not None
-            and self._handle_deterministic_knowledge_route(
+        if depth == 0 and tool_route is not None:
+            knowledge_handled = self._handle_deterministic_knowledge_route(
                 query, tool_route, current_sentence_id, latency, response_policy
             )
-        ):
-            return True
+            if knowledge_handled:
+                return True
+            if tool_route.name == "enterprise_rag_probe":
+                functions = None
         use_function_call = functions is not None
 
         try:
@@ -1497,7 +1547,9 @@ class ConnectionHandler:
         # 支持多个并行工具调用 - 使用列表存储
         tool_calls_list = []  # 格式: [{"id": "", "name": "", "arguments": ""}]
         content_arguments = ""
+        leaked_tool_text_buffer = ""
         emotion_flag = True
+        tts_segmenter = StreamingTextSegmenter()
         try:
             for response in llm_responses:
                 if self.client_abort:
@@ -1542,16 +1594,29 @@ class ConnectionHandler:
                                     if new_part:
                                         tc["_da_sent"] = safe_end
                                         response_message.append(new_part)
-                                        self.tts.tts_text_queue.put(
-                                            TTSMessageDTO(
-                                                sentence_id=current_sentence_id,
-                                                sentence_type=SentenceType.MIDDLE,
-                                                content_type=ContentType.TEXT,
-                                                content_detail=new_part,
-                                            )
+                                        self._enqueue_tts_segments(
+                                            current_sentence_id,
+                                            tts_segmenter.accept(new_part),
                                         )
                 else:
                     content = response
+                    if self.intent_type == "lightweight_router" and content:
+                        leaked_tool_text_buffer += content
+                        if self._looks_like_tool_call_leak(leaked_tool_text_buffer):
+                            tool_call_flag = True
+                            content_arguments = leaked_tool_text_buffer
+                            content = None
+                            self.logger.bind(tag=TAG).warning(
+                                "检测到疑似工具调用文本泄漏，已阻止播报: {}",
+                                leaked_tool_text_buffer[:120],
+                            )
+                            continue
+                        if self._looks_like_tool_call_prefix(
+                            leaked_tool_text_buffer
+                        ):
+                            content = None
+                            continue
+                        leaked_tool_text_buffer = ""
 
                 # 在llm回复中获取情绪表情，一轮对话只在开头获取一次
                 if emotion_flag and content is not None and content.strip():
@@ -1574,13 +1639,9 @@ class ConnectionHandler:
                         budgeted_content = response_budget.accept(content)
                         if budgeted_content:
                             response_message.append(budgeted_content)
-                            self.tts.tts_text_queue.put(
-                                TTSMessageDTO(
-                                    sentence_id=current_sentence_id,
-                                    sentence_type=SentenceType.MIDDLE,
-                                    content_type=ContentType.TEXT,
-                                    content_detail=budgeted_content,
-                                )
+                            self._enqueue_tts_segments(
+                                current_sentence_id,
+                                tts_segmenter.accept(budgeted_content),
                             )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM stream processing error: {e}")
@@ -1601,6 +1662,15 @@ class ConnectionHandler:
                     )
                 )
             return
+        if not tool_call_flag:
+            final_pending = response_budget.finish()
+            if final_pending:
+                response_message.append(final_pending)
+                self._enqueue_tts_segments(
+                    current_sentence_id,
+                    tts_segmenter.accept(final_pending),
+                )
+            self._enqueue_tts_segments(current_sentence_id, tts_segmenter.flush())
         latency.mark("llm_end")
         self.logger.bind(tag=TAG).info(
             "LATENCY event=llm_end trace={} depth={} ms={} first_token_ms={}",
@@ -1659,14 +1729,14 @@ class ConnectionHandler:
                                 remaining = response_budget.accept(remaining)
                                 if remaining:
                                     response_message.append(remaining)
-                                    self.tts.tts_text_queue.put(
-                                        TTSMessageDTO(
-                                            sentence_id=current_sentence_id,
-                                            sentence_type=SentenceType.MIDDLE,
-                                            content_type=ContentType.TEXT,
-                                            content_detail=remaining,
-                                        )
+                                    self._enqueue_tts_segments(
+                                        current_sentence_id,
+                                        tts_segmenter.accept(remaining),
                                     )
+                            self._enqueue_tts_segments(
+                                current_sentence_id,
+                                tts_segmenter.flush(),
+                            )
                             # 写入对话历史
                             da_response = "".join(response_message) or self._clean_response_garbage(da_response)
                             self.tts.store_tts_text(current_sentence_id, da_response)
@@ -1762,7 +1832,12 @@ class ConnectionHandler:
 
                 # 统一处理工具调用结果
                 if tool_results:
-                    self._handle_function_result(tool_results, depth=depth, streamed_text=streamed_text)
+                    self._handle_function_result(
+                        tool_results,
+                        depth=depth,
+                        streamed_text=streamed_text,
+                        response_policy=response_policy,
+                    )
 
         # 存储对话内容
         if len(response_message) > 0:
@@ -1796,7 +1871,9 @@ class ConnectionHandler:
 
         return True
 
-    def _handle_function_result(self, tool_results, depth, streamed_text=""):
+    def _handle_function_result(
+        self, tool_results, depth, streamed_text="", response_policy=None
+    ):
         need_llm_tools = []
         record_tools = []
 
@@ -1816,6 +1893,12 @@ class ConnectionHandler:
                     self.tts.store_tts_text(self.sentence_id, text)
                 self.dialogue.put(Message(role="assistant", content=text))
             elif result.action == Action.REQLLM:
+                if result.response:
+                    self.logger.bind(tag=TAG).info(
+                        "LATENCY event=staged_first_reply text_len={}",
+                        len(result.response or ""),
+                    )
+                    self._enqueue_tts_text_segments(self.sentence_id, result.response)
                 need_llm_tools.append((result, tool_call_data))
             elif result.action == Action.RECORD:
                 record_tools.append((result, tool_call_data))
@@ -1902,7 +1985,7 @@ class ConnectionHandler:
                         )
                     )
 
-            self.chat(None, depth=depth + 1)
+            self.chat(None, depth=depth + 1, response_policy=response_policy)
 
     def _report_worker(self):
         """聊天记录上报工作线程"""
@@ -2227,6 +2310,40 @@ class ConnectionHandler:
         # 清理末尾残留的 JSON 闭合符号
         result = re.sub(r'["\'}\]]+$', '', result.rstrip()).rstrip()
         return result
+
+    @staticmethod
+    def _looks_like_tool_call_leak(text):
+        """识别模型把工具调用格式当普通文本输出的情况，避免 TTS 读出工具名/参数。"""
+        if not text:
+            return False
+        lowered = text.strip().lower()
+        if not lowered:
+            return False
+        leak_markers = [
+            "<tool_call>",
+            "search_from_ragflow",
+            "direct_answer",
+            "function_call",
+            "\"tool_calls\"",
+            "\"arguments\"",
+            "'arguments'",
+        ]
+        if any(marker in lowered for marker in leak_markers):
+            return True
+        return bool(
+            re.search(
+                r"(^|[\\{,\\s'\"])(name|function_name)\\s*[:=]\\s*['\"]?[a-zA-Z_][\\w_]*",
+                lowered,
+            )
+        )
+
+    @staticmethod
+    def _looks_like_tool_call_prefix(text):
+        """Hold structured prefixes until they can be accepted or rejected safely."""
+        if not text:
+            return False
+        stripped = text.lstrip()
+        return stripped.startswith(("{", "<")) and len(stripped) <= 256
 
     def _merge_tool_calls(self, tool_calls_list, tools_call):
         """合并工具调用列表

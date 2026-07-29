@@ -2,6 +2,7 @@ import os
 import uuid
 import json
 import queue
+import time
 import asyncio
 import traceback
 import websockets
@@ -201,6 +202,7 @@ class TTSProvider(TTSProviderBase):
         enable_ws_reuse_value = config.get("enable_ws_reuse", True)
         self.enable_ws_reuse = False if str(enable_ws_reuse_value).lower() == 'false' else True
         self.tts_text = ""
+        self._session_latency = {}
 
         model_key_msg = check_model_key("TTS", self.access_token)
         if model_key_msg:
@@ -221,13 +223,14 @@ class TTSProvider(TTSProviderBase):
         try:
             if self.ws:
                 if self.enable_ws_reuse:
-                    logger.bind(tag=TAG).debug(f"使用已有链接...")
+                    logger.bind(tag=TAG).info("LATENCY event=huoshan_ws connection_reused=true")
                     return self.ws
                 else:
                     try:
                         await self.finish_connection()
                     except:
                         pass
+            started_at = time.monotonic()
             logger.bind(tag=TAG).debug("开始建立新连接...")
 
             # 建立新连接前取消旧监听任务
@@ -242,7 +245,10 @@ class TTSProvider(TTSProviderBase):
             self.ws = await websockets.connect(
                 self.ws_url, additional_headers=ws_header, max_size=1000000000
             )
-            logger.bind(tag=TAG).debug("WebSocket连接建立成功")
+            logger.bind(tag=TAG).info(
+                "LATENCY event=huoshan_ws connection_reused=false connect_ms={}",
+                int((time.monotonic() - started_at) * 1000),
+            )
             
             # 连接建立成功后，启动监听任务
             if self._monitor_task is None or self._monitor_task.done():
@@ -406,6 +412,12 @@ class TTSProvider(TTSProviderBase):
             
             # 设置会话激活标志
             self.activate_session = True
+            started_at = time.monotonic()
+            self._session_latency[session_id] = {
+                "session_start": started_at,
+                "first_text_sent": None,
+                "first_audio": None,
+            }
             
             # 确保连接建立
             await self._ensure_connection()
@@ -422,7 +434,11 @@ class TTSProvider(TTSProviderBase):
                 event=EVENT_StartSession, speaker=self.voice
             )
             await self.send_event(self.ws, header, optional, payload)
-            logger.bind(tag=TAG).debug("会话启动请求已发送")
+            logger.bind(tag=TAG).info(
+                "LATENCY event=huoshan_session_start session={} ms={}",
+                session_id,
+                int((time.monotonic() - started_at) * 1000),
+            )
         except Exception as e:
             logger.bind(tag=TAG).error(f"启动会话失败: {str(e)}")
             # 确保清理资源
@@ -522,6 +538,22 @@ class TTSProvider(TTSProviderBase):
                         res.optional.event == EVENT_TTSResponse
                         and res.header.message_type == AUDIO_ONLY_RESPONSE
                     ):
+                        session_latency = self._session_latency.get(self.conn.sentence_id)
+                        if (
+                            session_latency is not None
+                            and session_latency.get("first_audio") is None
+                        ):
+                            now = time.monotonic()
+                            session_latency["first_audio"] = now
+                            first_text_sent = session_latency.get("first_text_sent")
+                            logger.bind(tag=TAG).info(
+                                "LATENCY event=huoshan_first_audio session={} session_ms={} after_text_ms={}",
+                                self.conn.sentence_id,
+                                int((now - session_latency["session_start"]) * 1000),
+                                int((now - first_text_sent) * 1000)
+                                if first_text_sent
+                                else None,
+                            )
                         # 处理seed-tts-2.0文本字幕
                         if self.resource_type:
                             tts_text = self.get_tts_text(self.conn.sentence_id)
@@ -585,6 +617,7 @@ class TTSProvider(TTSProviderBase):
             raise
 
     async def send_text(self, speaker: str, text: str, session_id):
+        started_at = time.monotonic()
         header = Header(
             message_type=FULL_CLIENT_REQUEST,
             message_type_specific_flags=MsgTypeFlagWithEvent,
@@ -594,7 +627,19 @@ class TTSProvider(TTSProviderBase):
         payload = self.get_payload_bytes(
             event=EVENT_TaskRequest, text=text, speaker=speaker
         )
-        return await self.send_event(self.ws, header, optional, payload)
+        result = await self.send_event(self.ws, header, optional, payload)
+        session_latency = self._session_latency.get(session_id)
+        if session_latency is not None and session_latency.get("first_text_sent") is None:
+            now = time.monotonic()
+            session_latency["first_text_sent"] = now
+            logger.bind(tag=TAG).info(
+                "LATENCY event=huoshan_first_text_sent session={} session_ms={} send_ms={} chars={}",
+                session_id,
+                int((now - session_latency["session_start"]) * 1000),
+                int((now - started_at) * 1000),
+                len(text or ""),
+            )
+        return result
 
     # 读取 res 数组某段 字符串内容
     def read_res_content(self, res: bytes, offset: int):
