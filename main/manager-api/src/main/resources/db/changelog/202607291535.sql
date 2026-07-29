@@ -20,7 +20,7 @@ VALUES (
   '轻量工具路由',
   0,
   1,
-  '{\"type\": \"lightweight_router\", \"functions\": [\"web_search\", \"get_weather\", \"get_news_from_newsnow\", \"play_music\"]}',
+  '{\"type\": \"lightweight_router\", \"functions\": \"web_search;get_weather;get_news_from_newsnow;play_music;search_from_ragflow\"}',
   NULL,
   '轻量工具路由说明：
 1. 该模式不会先调用额外 LLM 做意图识别，普通聊天默认不挂载工具，保持低延迟。
