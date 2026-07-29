@@ -73,8 +73,19 @@ class ServerPluginExecutor(ToolExecutor):
             except TypeError:
                 config_functions = []
 
+        # 管理端可能在 nointent 下仅下发 plugins 配置，不下发 Intent.functions。
+        # 这里把 plugins 中已配置且已注册的插件也纳入可用工具池，
+        # 后续由轻量路由决定本轮是否真正挂给 LLM。
+        configured_plugin_functions = [
+            name
+            for name in (self.config.get("plugins") or {}).keys()
+            if name in all_function_registry
+        ]
+
         # 合并所有需要的函数
-        all_required_functions = list(set(necessary_functions + config_functions))
+        all_required_functions = list(
+            set(necessary_functions + config_functions + configured_plugin_functions)
+        )
 
         for func_name in all_required_functions:
             func_item = all_function_registry.get(func_name)

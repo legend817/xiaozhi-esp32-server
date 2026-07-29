@@ -47,6 +47,7 @@ from core.utils.util import get_system_error_response
 from core.utils import textUtils
 from core.utils.latency import LatencyTracker
 from core.utils.response_policy import ResponseBudget, build_response_policy
+from core.utils.tool_router import build_tool_route
 
 
 TAG = __name__
@@ -998,11 +999,8 @@ class ConnectionHandler:
             "type"
         ]
 
-        # 如果使用 nointent，直接返回
-        if intent_type == "nointent":
-            return
         # 使用 intent_llm 模式
-        elif intent_type == "intent_llm":
+        if intent_type == "intent_llm":
             intent_llm_name = intent_config[self.config["selected_module"]["Intent"]][
                 "llm"
             ]
@@ -1031,6 +1029,64 @@ class ConnectionHandler:
         # 异步初始化工具处理器
         if hasattr(self, "loop") and self.loop:
             asyncio.run_coroutine_threadsafe(self.func_handler._initialize(), self.loop)
+
+    def _select_routed_functions(self, query, depth, force_final_answer, latency):
+        """Return a minimal tools list for this turn.
+
+        function_call mode keeps the original full-tool behavior.
+        nointent mode uses deterministic routing and only exposes matched tools.
+        """
+        if force_final_answer:
+            return None, None
+        if not hasattr(self, "func_handler") or self.func_handler is None:
+            return None, None
+
+        all_functions = list(self.func_handler.get_functions())
+        if not all_functions:
+            return None, None
+
+        if self.intent_type == "function_call":
+            functions = all_functions
+            if depth == 0:
+                functions.append(DIRECT_ANSWER_TOOL)
+            return functions, None
+
+        if self.intent_type != "nointent" or depth != 0:
+            return None, None
+
+        available_names = [
+            item.get("function", {}).get("name")
+            for item in all_functions
+            if item.get("function", {}).get("name")
+        ]
+        route = build_tool_route(query, available_names)
+        selected_names = set(route.tool_names)
+        if not selected_names:
+            self.logger.bind(tag=TAG).info(
+                "LATENCY event=tool_route trace={} route={} tools=false reason={}",
+                latency.trace_id,
+                route.name,
+                route.reason,
+            )
+            return None, route
+
+        functions = [
+            item
+            for item in all_functions
+            if item.get("function", {}).get("name") in selected_names
+        ]
+        if functions:
+            functions.append(DIRECT_ANSWER_TOOL)
+            self.logger.bind(tag=TAG).info(
+                "LATENCY event=tool_route trace={} route={} tools={} reason={}",
+                latency.trace_id,
+                route.name,
+                [item.get("function", {}).get("name") for item in functions],
+                route.reason,
+            )
+            return functions, route
+
+        return None, route
 
     def change_system_prompt(self, prompt):
         self.prompt = prompt
@@ -1108,20 +1164,6 @@ class ConnectionHandler:
                 )
             )
 
-        # Define intent functions
-        functions = None
-        # 达到最大深度时，禁用工具调用，强制 LLM 直接回答
-        if (
-                self.intent_type == "function_call"
-                and hasattr(self, "func_handler")
-                and not force_final_answer
-        ):
-            functions = list(self.func_handler.get_functions())
-            # 仅在第一层调用时注入 direct_answer 虚拟工具
-            # 递归调用（depth>0）不注入，避免模型在生成文本回复时再次调 direct_answer 导致循环
-            if functions is not None and depth == 0:
-                functions.append(DIRECT_ANSWER_TOOL)
-
         response_message = []
         response_policy = build_response_policy(query if depth == 0 else None)
         response_budget = ResponseBudget(response_policy)
@@ -1133,6 +1175,13 @@ class ConnectionHandler:
                 response_policy.max_chars,
                 bool(response_policy.suffix),
             )
+
+        # Define turn tools. In nointent mode this uses the lightweight router;
+        # in function_call mode it preserves the original full-tool behavior.
+        functions, tool_route = self._select_routed_functions(
+            query, depth, force_final_answer, latency
+        )
+        use_function_call = functions is not None
 
         try:
             # 使用带记忆的对话
@@ -1152,7 +1201,7 @@ class ConnectionHandler:
                 self.system_introduced_speakers.add(cs)
                 speaker_for_system = cs
 
-            if self.intent_type == "function_call" and functions is not None:
+            if use_function_call:
                 # 使用支持functions的streaming接口
                 latency.mark("llm_start")
                 dialogue = self.dialogue.get_llm_dialogue_with_memory(
@@ -1188,7 +1237,7 @@ class ConnectionHandler:
             for response in llm_responses:
                 if self.client_abort:
                     break
-                if self.intent_type == "function_call" and functions is not None:
+                if use_function_call:
                     content, tools_call = response
                     if "content" in response:
                         content = response["content"]
