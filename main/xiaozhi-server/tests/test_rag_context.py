@@ -8,7 +8,6 @@ from core.utils.rag_context import (
     select_enterprise_location_answer,
     select_direct_qa_answer,
     select_rag_contexts,
-    select_staged_rag_first_sentence,
 )
 
 
@@ -311,71 +310,6 @@ class SelectRagContextsTests(unittest.TestCase):
         self.assertEqual(
             "中科生创集团总部地址为福建省福州市鼓楼区水部街道五一中路18号正大广场1#楼1层、2层。",
             select_direct_qa_answer("中科生创集团在哪里？", chunks, max_chars=120),
-        )
-
-    def test_select_staged_rag_first_sentence_from_qa_answer(self):
-        chunks = [
-            {
-                "similarity": 0.45,
-                "content": "问题：详细介绍公司\t回答：公司是生物科技企业，聚焦医疗器械产业化。第二句继续介绍。",
-            }
-        ]
-
-        self.assertEqual(
-            "公司是生物科技企业，聚焦医疗器械产业化。",
-            select_staged_rag_first_sentence("请详细介绍公司", chunks),
-        )
-
-    def test_select_staged_rag_first_sentence_from_plain_chunk(self):
-        chunks = [
-            {
-                "similarity": 0.45,
-                "content": "中科生创集团总部位于福州。集团聚焦生物医药转化。",
-            }
-        ]
-
-        self.assertEqual(
-            "中科生创集团总部位于福州。",
-            select_staged_rag_first_sentence("介绍一下中科生创集团", chunks),
-        )
-
-    def test_select_staged_rag_first_sentence_allows_comma_boundary(self):
-        chunks = [
-            {
-                "similarity": 0.45,
-                "content": "中科生创集团的临床应用中心位于福州国际医疗综合试验区，与复旦大学附属华山医院福建医院共建。",
-            }
-        ]
-
-        self.assertEqual(
-            "中科生创集团的临床应用中心位于福州国际医疗综合试验区，",
-            select_staged_rag_first_sentence("请详细介绍一下中科生创集团", chunks),
-        )
-
-    def test_select_staged_rag_first_sentence_skips_detail_list_questions(self):
-        chunks = [
-            {
-                "similarity": 0.45,
-                "content": "问题：公司有多少位科学家？\t回答：公司共有九位科学家，分别为甲、乙、丙。",
-            }
-        ]
-
-        self.assertEqual(
-            "",
-            select_staged_rag_first_sentence("公司有多少位科学家，分别是谁？", chunks),
-        )
-
-    def test_select_staged_rag_first_sentence_never_hard_truncates_fact(self):
-        chunks = [
-            {
-                "similarity": 0.45,
-                "content": "中科生创集团的临床应用中心是在福州国际医疗综合试验区与复旦大学附属华山医院福建医院共建的重要平台",
-            }
-        ]
-
-        self.assertEqual(
-            "",
-            select_staged_rag_first_sentence("请详细介绍一下中科生创集团", chunks),
         )
 
     def test_direct_answer_falls_back_for_explanation_or_conflict(self):

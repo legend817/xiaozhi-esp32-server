@@ -41,13 +41,6 @@ _COUNT_QUERY_PATTERN = re.compile(r"(?:多少|几位|几人|几个|数量|总数
 _COUNT_ANSWER_TAIL = re.compile(r"[，,；;:]\s*(?:分别|包括|具体|其中).*$", re.DOTALL)
 _PHONE_SEPARATOR_SPACE = re.compile(r"(?<=\d[-－—])\s+(?=\d)")
 _SENTENCE_END_PATTERN = re.compile(r"[。！？!?；;]")
-_SOFT_SENTENCE_END_PATTERN = re.compile(r"[，,、：:]")
-_FORBIDDEN_STAGED_PREFIXES = (
-    "问题",
-    "提问",
-    "回答",
-    "答案",
-)
 _ORG_SUBJECT_PATTERN = re.compile(
     r"([\u4e00-\u9fffA-Za-z0-9·]{2,24}?(?:集团|公司|企业|总部))"
 )
@@ -340,44 +333,6 @@ def select_enterprise_location_answer(
     return ""
 
 
-def select_staged_rag_first_sentence(
-    question,
-    chunks,
-    min_similarity=0.3,
-    min_chars=10,
-    max_chars=64,
-):
-    """Extract a short factual first sentence from retrieved RAG chunks.
-
-    This is used before the LLM summary is ready. It must come from retrieved
-    content, stay short enough for fast TTS, and avoid generic labels such as
-    "问题：" or "回答：".
-    """
-    query = str(question or "").strip()
-    if not query or _asks_for_detail_list(query):
-        return ""
-
-    for chunk in chunks or []:
-        try:
-            score = float(chunk.get("similarity", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            score = 0.0
-        if score < min_similarity:
-            continue
-
-        content = str(chunk.get("content", "") or "").strip()
-        if not content:
-            continue
-
-        _, qa_answer = _parse_qa_content(content)
-        source_text = qa_answer or content
-        sentence = _first_fact_sentence(source_text, max_chars=max_chars)
-        if _is_usable_staged_sentence(sentence, min_chars=min_chars, max_chars=max_chars):
-            return sentence
-
-    return ""
-
-
 def _context_dedupe_key(content):
     match = _ANSWER_MARKER.search(content)
     comparable = match.group(1) if match else content
@@ -514,42 +469,9 @@ def _first_sentence(text):
     return split[0].rstrip("，,；;:：。.") + "。" if split and split[0].strip() else normalized
 
 
-def _first_fact_sentence(text, max_chars):
-    normalized = _normalize_answer_text(text)
-    if not normalized:
-        return ""
-
-    soft_match = _SOFT_SENTENCE_END_PATTERN.search(normalized)
-    if soft_match and 18 <= soft_match.start() + 1 <= max_chars:
-        return normalized[: soft_match.start() + 1].strip()
-
-    match = _SENTENCE_END_PATTERN.search(normalized)
-    if match and match.start() + 1 <= max_chars:
-        return normalized[: match.start() + 1].strip()
-
-    if len(normalized) <= min(max_chars, 42):
-        return normalized
-    return ""
-
-
-def _is_usable_staged_sentence(sentence, min_chars, max_chars):
-    text = str(sentence or "").strip()
-    if len(text) < min_chars or len(text) > max_chars:
-        return False
-    comparable = text.strip("，,。.!！?？;；:：、\"'“”‘’`()（）[]【】")
-    if not comparable:
-        return False
-    return not any(comparable.startswith(prefix) for prefix in _FORBIDDEN_STAGED_PREFIXES)
-
-
 def _asks_for_detail(text):
     normalized = re.sub(r"\s+", "", str(text or ""))
     return any(term in normalized for term in _DETAIL_QUERY_TERMS)
-
-
-def _asks_for_detail_list(text):
-    normalized = re.sub(r"\s+", "", str(text or ""))
-    return any(term in normalized for term in ("分别", "名单", "列出"))
 
 
 def _normalize_answer_text(text):

@@ -15,7 +15,6 @@ from core.utils.rag_context import (
     select_direct_qa_answer,
     select_enterprise_location_answer,
     select_rag_contexts,
-    select_staged_rag_first_sentence,
 )
 from core.utils.ragflow_http import ragflow_http_client_pool
 
@@ -42,7 +41,6 @@ DEFAULT_DIRECT_ANSWER_MAX_CHARS = 75
 DEFAULT_DIRECT_ALIAS_CACHE_ENABLED = True
 DEFAULT_STAGED_FIRST_REPLY_ENABLED = True
 DEFAULT_STAGED_FIRST_REPLY = ""
-DEFAULT_STAGED_RAG_FIRST_SENTENCE_ENABLED = False
 DIRECT_ANSWER_ALIAS_CACHE_NAMESPACE = "direct_answer_alias"
 # Bump whenever direct-answer parsing or safety rules change, so an in-process
 # cache can never preserve an answer produced by an older rule set.
@@ -114,11 +112,6 @@ async def search_from_ragflow(conn: "ConnectionHandler", question=None):
     staged_first_reply = str(
         ragflow_config.get("staged_first_reply", DEFAULT_STAGED_FIRST_REPLY) or ""
     ).strip()
-    staged_rag_first_sentence_enabled = _get_bool_config(
-        ragflow_config,
-        "staged_rag_first_sentence_enabled",
-        DEFAULT_STAGED_RAG_FIRST_SENTENCE_ENABLED,
-    )
     direct_answer_min_similarity = _get_float_config(
         ragflow_config,
         "direct_answer_min_similarity",
@@ -383,14 +376,7 @@ async def search_from_ragflow(conn: "ConnectionHandler", question=None):
             return ActionResponse(Action.RESPONSE, None, direct_answer)
         configured_staged_reply = staged_first_reply
         staged_first_reply = ""
-        staged_first_reply_source = "disabled"
-        if staged_rag_first_sentence_enabled:
-            staged_first_reply = select_staged_rag_first_sentence(
-                question,
-                chunks,
-                min_similarity=request_threshold,
-            )
-            staged_first_reply_source = "rag_first_sentence" if staged_first_reply else "none"
+        staged_first_reply_source = "none"
 
         if not staged_first_reply and staged_first_reply_enabled and configured_staged_reply:
             staged_first_reply = configured_staged_reply
