@@ -73,7 +73,7 @@ class ServerPluginExecutor(ToolExecutor):
             except TypeError:
                 config_functions = []
 
-        # 管理端可能在 nointent 下仅下发 plugins 配置，不下发 Intent.functions。
+        # 管理端可能在 lightweight_router 下仅下发 plugins 配置，不下发 Intent.functions。
         # 这里把 plugins 中已配置且已注册的插件也纳入可用工具池，
         # 后续由轻量路由决定本轮是否真正挂给 LLM。
         configured_plugin_functions = [

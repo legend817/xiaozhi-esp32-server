@@ -16,12 +16,15 @@
 - `tools=false`
 - LLM 首 token 和 TTS 首包恢复到较快路径
 
-问题是：完全 `nointent` 又无法按需使用工具，例如设备 MCP、天气、新闻、RAG 等。
+问题是：完全 `nointent` 的语义应保持为“无意图、无工具”，不能为了优化工具调用而改变原有行为。
+如果要兼顾低延迟和按需工具调用，应使用独立的意图识别选项。
 
 ## 当前方案
 
-新增轻量工具路由：
+新增 `Intent_lightweight_router`（轻量工具路由）：
 
+- `Intent_nointent` 保持原始行为：不加载工具、不暴露工具、直接进入普通 LLM 对话
+- `Intent_lightweight_router` 才启用轻量工具路由
 - 默认直接 LLM：`tools=false`
 - 只有用户问题明确命中某类能力时，才给 LLM 暴露对应工具
 - 不使用额外 LLM 做意图识别，避免引入新的前置延迟
@@ -31,11 +34,18 @@
 
 - `main/xiaozhi-server/core/utils/tool_router.py`
 - `main/xiaozhi-server/core/connection.py`
+- `main/xiaozhi-server/core/providers/intent/lightweight_router/lightweight_router.py`
 - `main/xiaozhi-server/core/providers/tools/server_plugins/plugin_executor.py`
+
+管理端配置：
+
+- Provider：`SYSTEM_Intent_lightweight_router`
+- Model config：`Intent_lightweight_router`
+- type：`lightweight_router`
 
 ## 路由规则
 
-当前支持的路由：
+仅当智能体选择 `Intent_lightweight_router` 时，当前支持的路由：
 
 | route | 触发类型 | 暴露工具 |
 |---|---|---|
@@ -108,9 +118,11 @@ LATENCY event=tts_first_audio ms=685
 
 ## 维护注意
 
-1. 新增工具时，不要默认放进全局 function_call。
-2. 先在 `tool_router.py` 增加明确规则。
-3. 工具只在管理端已配置、或设备 MCP 已上报时才会进入可用池。
-4. RAG 不应全局挂载，应通过 `enterprise_rag` route 按需触发。
-5. 如果某类问题误触发工具，优先收紧关键词，不要重新打开全局意图识别。
-6. 设备控制类优先确定性执行；只有规则无法解析时，才退回小工具集 function_call。
+1. 不要改变 `Intent_nointent` 的原始语义；它必须保持完全无工具。
+2. 新增低延迟工具能力时，应挂到 `Intent_lightweight_router`。
+3. 新增工具时，不要默认放进全局 function_call。
+4. 先在 `tool_router.py` 增加明确规则。
+5. 工具只在管理端已配置、或设备 MCP 已上报时才会进入可用池。
+6. RAG 不应全局挂载，应通过 `enterprise_rag` route 按需触发。
+7. 如果某类问题误触发工具，优先收紧关键词，不要重新打开全局意图识别。
+8. 设备控制类优先确定性执行；只有规则无法解析时，才退回小工具集 function_call。

@@ -990,7 +990,7 @@ class ConnectionHandler:
         self.intent_type = self.config["Intent"][
             self.config["selected_module"]["Intent"]
         ]["type"]
-        if self.intent_type == "function_call" or self.intent_type == "intent_llm":
+        if self.intent_type in ("function_call", "intent_llm", "lightweight_router"):
             self.load_function_plugin = True
         """初始化意图识别模块"""
         # 获取意图识别配置
@@ -1034,7 +1034,8 @@ class ConnectionHandler:
         """Return a minimal tools list for this turn.
 
         function_call mode keeps the original full-tool behavior.
-        nointent mode uses deterministic routing and only exposes matched tools.
+        lightweight_router mode uses deterministic routing and only exposes matched tools.
+        nointent mode keeps the original no-tool behavior.
         """
         if force_final_answer:
             return None, None
@@ -1051,7 +1052,7 @@ class ConnectionHandler:
                 functions.append(DIRECT_ANSWER_TOOL)
             return functions, None
 
-        if self.intent_type != "nointent" or depth != 0:
+        if self.intent_type != "lightweight_router" or depth != 0:
             return None, None
 
         available_names = [
@@ -1385,7 +1386,7 @@ class ConnectionHandler:
                 bool(response_policy.suffix),
             )
 
-        # Define turn tools. In nointent mode this uses the lightweight router;
+        # Define turn tools. In lightweight_router mode this uses the lightweight router;
         # in function_call mode it preserves the original full-tool behavior.
         functions, tool_route = self._select_routed_functions(
             query, depth, force_final_answer, latency
