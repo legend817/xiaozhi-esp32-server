@@ -21,3 +21,14 @@ services:
       - TZ=Asia/Shanghai
       - XIAOZHI_SOURCE_REVISION=${XIAOZHI_DEV_TAG:-dev}
       - PYTHONUNBUFFERED=1
+
+  xiaozhi-esp32-server-web:
+    image: xiaozhi-esp32-server-web:${XIAOZHI_WEB_DEV_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: Dockerfile-web
+      labels:
+        org.opencontainers.image.source: local-workspace
+        org.opencontainers.image.revision: ${XIAOZHI_WEB_DEV_TAG:-dev}
+    environment:
+      - TZ=Asia/Shanghai

@@ -1342,10 +1342,10 @@ export default {
       return name.charAt(0);
     },
     showFunctionIcons(type) {
-      return type === "Intent" && this.form.model.intentModelId !== "Intent_nointent";
+      return type === "Intent";
     },
     handleModelChange(type, value) {
-      if (type === "Intent" && value !== "Intent_nointent") {
+      if (type === "Intent") {
         this.fetchAllFunctions().then((metadataReady) => {
           if (metadataReady) {
             this.enrichCurrentFunctionsWithMetadata();
