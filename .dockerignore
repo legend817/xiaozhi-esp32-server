@@ -10,7 +10,9 @@ data/
 # local configs, and model artifacts; do not send it to the Docker build context.
 deploy/
 
-# Modules that are not copied by Dockerfile-server or Dockerfile-web.
+# Modules that are not copied by Dockerfile-server.
+main/manager-api/
+main/manager-web/
 main/manager-mobile/
 main/digital-human/
 
