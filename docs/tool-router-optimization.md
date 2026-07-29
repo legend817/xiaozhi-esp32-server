@@ -29,6 +29,7 @@
 - 只有用户问题明确命中某类能力时，才给 LLM 暴露对应工具
 - 不使用额外 LLM 做意图识别，避免引入新的前置延迟
 - 设备音量/亮度/主题等明确控制指令走确定性执行，不再让 LLM 自由决定工具链
+- 企业 RAG 问答命中 `enterprise_rag` 时走确定性 RAG 快路径，后端直接调用 `search_from_ragflow`，省掉第一轮 LLM 工具决策
 
 核心文件：
 
@@ -42,6 +43,7 @@
 - Provider：`SYSTEM_Intent_lightweight_router`
 - Model config：`Intent_lightweight_router`
 - type：`lightweight_router`
+- 不再配置 `functions` 白名单；可用工具来自智能体绑定插件
 
 ## 路由规则
 
@@ -126,3 +128,37 @@ LATENCY event=tts_first_audio ms=685
 6. RAG 不应全局挂载，应通过 `enterprise_rag` route 按需触发。
 7. 如果某类问题误触发工具，优先收紧关键词，不要重新打开全局意图识别。
 8. 设备控制类优先确定性执行；只有规则无法解析时，才退回小工具集 function_call。
+9. 企业 RAG 类优先确定性执行；只有规则无法确定为企业知识库问题时，才退回普通 LLM 或小工具集。
+10. `Intent_lightweight_router` 不再维护 `Intent.functions` 白名单。新增工具的维护顺序是：
+    1. 在管理端给智能体绑定插件并配置参数；
+    2. 在 `tool_router.py` 增加明确路由规则；
+    3. 必要时在 `connection.py` 增加确定性执行分支。
+
+## 企业 RAG 确定性执行 v1
+
+问题：`中科生创公司是做什么的？`
+
+优化前，`Intent_function_call` 会先让 LLM 决定是否调用 RAG：
+
+```text
+chat_end total_ms=5574
+tts_first_audio ms=5697
+```
+
+优化后，`Intent_lightweight_router` 命中 `enterprise_rag` 时，后端直接执行 RAG：
+
+```text
+LATENCY event=tool_route route=enterprise_rag tools=['search_from_ragflow', 'direct_answer']
+LATENCY event=deterministic_tool_route route=enterprise_rag tool=search_from_ragflow
+LATENCY event=ragflow_retrieval ms=903
+LATENCY event=ragflow_context chunks=3 selected_chunks=3 selected_chars=1739 page_size=3 top_k=16 similarity_threshold=0.3
+LATENCY event=chat_end total_ms=2496
+LATENCY event=tts_first_audio ms=2602
+```
+
+结论：
+
+- 省掉第一轮 LLM 工具决策；
+- RAGFlow 返回上下文从默认约 30 个 chunk 收敛到 3 个 chunk；
+- LLM 二次总结输入明显减少；
+- 企业信息问答当前不需要 staged RAG，先直接等 RAG 返回后回答。
