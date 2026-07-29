@@ -110,8 +110,10 @@ docker compose -f deploy/docker-compose_all.yml up -d --no-deps --force-recreate
 
 - Do not run `git add deploy/`. The `deploy/` directory contains local runtime
   state such as database files, uploaded files, local config, and model files.
-- If code changes are ready to commit, add only the safe development overlay:
-  `deploy/docker-compose.dev.yml`.
+- If source-image workflow changes are ready to commit, add only the safe
+  source-build files, for example `Dockerfile-server`,
+  `deploy/docker-compose.dev.yml`, `.dockerignore`, and this document. Do not
+  include runtime state under `deploy/`.
 - `.dockerignore` excludes `deploy/` from the Docker build context. Keep this
   rule, otherwise local runtime data can be sent into Docker builds.
 - `Dockerfile-server` copies only `main/xiaozhi-server/`, so manager/web/mobile
