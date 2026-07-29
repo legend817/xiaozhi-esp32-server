@@ -25,6 +25,7 @@
 - 默认直接 LLM：`tools=false`
 - 只有用户问题明确命中某类能力时，才给 LLM 暴露对应工具
 - 不使用额外 LLM 做意图识别，避免引入新的前置延迟
+- 设备音量/亮度/主题等明确控制指令走确定性执行，不再让 LLM 自由决定工具链
 
 核心文件：
 
@@ -81,6 +82,30 @@ LATENCY event=llm_request_start ... tools=true ... tool_count=3
 
 结论：设备音量类问题只携带音量相关工具，不再携带全部工具。
 
+### 设备音量确定性执行 v1
+
+问题：`把音量调大一点`
+
+日志：
+
+```text
+LATENCY event=tool_route route=device_volume tools=['self_get_device_status', 'self_audio_speaker_set_volume', 'direct_answer']
+LATENCY event=tool_end name=self_get_device_status action=REQLLM ms=358 deterministic=true
+LATENCY event=tool_end name=self_audio_speaker_set_volume action=REQLLM ms=18 deterministic=true
+LATENCY event=chat_end depth=0 total_ms=383 tool_total_ms=376 tool_count=2
+LATENCY event=tts_first_audio ms=685
+```
+
+结论：
+
+- 后端直接执行 `get_device_status` 和 `set_volume`
+- 没有进入 LLM function_call 决策
+- 当前音量为 0，目标音量计算为 10
+- 首包 TTS 约 685ms
+- 全链路播报结束约 2.6s
+
+相比让 LLM 自行决定工具链，确定性执行更快且不会出现“只查询状态但回复已设置”的错误。
+
 ## 维护注意
 
 1. 新增工具时，不要默认放进全局 function_call。
@@ -88,3 +113,4 @@ LATENCY event=llm_request_start ... tools=true ... tool_count=3
 3. 工具只在管理端已配置、或设备 MCP 已上报时才会进入可用池。
 4. RAG 不应全局挂载，应通过 `enterprise_rag` route 按需触发。
 5. 如果某类问题误触发工具，优先收紧关键词，不要重新打开全局意图识别。
+6. 设备控制类优先确定性执行；只有规则无法解析时，才退回小工具集 function_call。

@@ -1088,6 +1088,215 @@ class ConnectionHandler:
 
         return None, route
 
+    def _parse_percent_value(self, text):
+        match = re.search(r"(\d{1,3})\s*%?", text or "")
+        if not match:
+            return None
+        value = int(match.group(1))
+        return max(0, min(100, value))
+
+    def _parse_device_status_json(self, result):
+        if not result:
+            return {}
+        raw = result.result if hasattr(result, "result") else result
+        if isinstance(raw, dict):
+            return raw
+        if not isinstance(raw, str):
+            return {}
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {}
+
+    def _run_tool_sync(self, tool_name, arguments, latency=None):
+        tool_call_data = {
+            "id": str(uuid.uuid4().hex),
+            "name": tool_name,
+            "arguments": json.dumps(arguments or {}, ensure_ascii=False),
+        }
+        tool_started_at = LatencyTracker.now()
+        try:
+            enqueue_tool_report(self, tool_name, arguments or {})
+            future = asyncio.run_coroutine_threadsafe(
+                self.func_handler.handle_llm_function_call(self, tool_call_data),
+                self.loop,
+            )
+            tool_call_timeout = int(self.config.get("tool_call_timeout", 30))
+            result = future.result(timeout=tool_call_timeout)
+            tool_ms = LatencyTracker.ms_since(tool_started_at)
+            if latency is not None:
+                latency.add_counter("tool_total_ms", tool_ms)
+                latency.add_counter("tool_count", 1)
+            self.logger.bind(tag=TAG).info(
+                "LATENCY event=tool_end trace={} name={} action={} ms={} deterministic=true",
+                latency.trace_id if latency is not None else "-",
+                tool_name,
+                getattr(result.action, "name", result.action),
+                tool_ms,
+            )
+            enqueue_tool_report(
+                self,
+                tool_name,
+                arguments or {},
+                str(result.result) if result.result else None,
+                report_tool_call=False,
+            )
+            return result
+        except Exception as e:
+            tool_ms = LatencyTracker.ms_since(tool_started_at)
+            if latency is not None:
+                latency.add_counter("tool_total_ms", tool_ms)
+                latency.add_counter("tool_count", 1)
+            self.logger.bind(tag=TAG).error(
+                "LATENCY event=tool_error trace={} name={} ms={} deterministic=true error={}",
+                latency.trace_id if latency is not None else "-",
+                tool_name,
+                tool_ms,
+                e,
+            )
+            enqueue_tool_report(
+                self, tool_name, arguments or {}, str(e), report_tool_call=False
+            )
+            return ActionResponse(action=Action.ERROR, response=str(e))
+
+    def _finish_deterministic_reply(
+        self, current_sentence_id, latency, response_policy, text
+    ):
+        self.tts.tts_text_queue.put(
+            TTSMessageDTO(
+                sentence_id=current_sentence_id,
+                sentence_type=SentenceType.MIDDLE,
+                content_type=ContentType.TEXT,
+                content_detail=text,
+            )
+        )
+        self.tts.store_tts_text(current_sentence_id, text)
+        self.dialogue.put(Message(role="assistant", content=text))
+        self.tts.tts_text_queue.put(
+            TTSMessageDTO(
+                sentence_id=current_sentence_id,
+                sentence_type=SentenceType.LAST,
+                content_type=ContentType.ACTION,
+            )
+        )
+        latency.mark("chat_end")
+        self.logger.bind(tag=TAG).info(
+            "LATENCY event=chat_end {}", latency.summary()
+        )
+        return True
+
+    def _handle_deterministic_device_route(
+        self, query, route, current_sentence_id, latency, response_policy
+    ):
+        if route is None or route.name not in {
+            "device_volume",
+            "device_brightness",
+            "device_theme",
+        }:
+            return False
+
+        available_tools = set(route.tool_names or [])
+        text = query or ""
+
+        def has_tool(name):
+            return name in available_tools and self.func_handler.has_tool(name)
+
+        if route.name == "device_theme":
+            if not has_tool("self_screen_set_theme"):
+                return False
+            if any(word in text for word in ["深色", "暗色", "黑色", "dark"]):
+                theme = "dark"
+                label = "深色"
+            elif any(word in text for word in ["浅色", "亮色", "白色", "light"]):
+                theme = "light"
+                label = "浅色"
+            else:
+                return False
+
+            result = self._run_tool_sync(
+                "self_screen_set_theme", {"theme": theme}, latency
+            )
+            if result.action == Action.ERROR:
+                return self._finish_deterministic_reply(
+                    current_sentence_id, latency, response_policy, "主题设置失败。"
+                )
+            return self._finish_deterministic_reply(
+                current_sentence_id, latency, response_policy, f"已切换为{label}主题。"
+            )
+
+        status = {}
+        needs_status = any(word in text for word in ["大", "高", "小", "低", "增", "加", "减", "降"])
+        explicit_value = self._parse_percent_value(text)
+        if explicit_value is None or needs_status:
+            if not has_tool("self_get_device_status"):
+                return False
+            status_result = self._run_tool_sync("self_get_device_status", {}, latency)
+            if status_result.action == Action.ERROR:
+                return self._finish_deterministic_reply(
+                    current_sentence_id, latency, response_policy, "我没拿到设备状态，暂时调不了。"
+                )
+            status = self._parse_device_status_json(status_result)
+
+        if route.name == "device_volume":
+            if not has_tool("self_audio_speaker_set_volume"):
+                return False
+            current = (
+                status.get("audio_speaker", {}).get("volume")
+                if isinstance(status, dict)
+                else None
+            )
+            if explicit_value is not None and any(word in text for word in ["到", "为", "成", "设"]):
+                target = explicit_value
+            elif current is not None:
+                delta = -10 if any(word in text for word in ["小", "低", "减", "降"]) else 10
+                target = max(0, min(100, int(current) + delta))
+            elif explicit_value is not None:
+                target = explicit_value
+            else:
+                return False
+
+            result = self._run_tool_sync(
+                "self_audio_speaker_set_volume", {"volume": target}, latency
+            )
+            if result.action == Action.ERROR:
+                return self._finish_deterministic_reply(
+                    current_sentence_id, latency, response_policy, "音量设置失败。"
+                )
+            return self._finish_deterministic_reply(
+                current_sentence_id, latency, response_policy, f"音量已调到{target}。"
+            )
+
+        if route.name == "device_brightness":
+            if not has_tool("self_screen_set_brightness"):
+                return False
+            current = (
+                status.get("screen", {}).get("brightness")
+                if isinstance(status, dict)
+                else None
+            )
+            if explicit_value is not None and any(word in text for word in ["到", "为", "成", "设"]):
+                target = explicit_value
+            elif current is not None:
+                delta = -10 if any(word in text for word in ["小", "低", "暗", "减", "降"]) else 10
+                target = max(0, min(100, int(current) + delta))
+            elif explicit_value is not None:
+                target = explicit_value
+            else:
+                return False
+
+            result = self._run_tool_sync(
+                "self_screen_set_brightness", {"brightness": target}, latency
+            )
+            if result.action == Action.ERROR:
+                return self._finish_deterministic_reply(
+                    current_sentence_id, latency, response_policy, "亮度设置失败。"
+                )
+            return self._finish_deterministic_reply(
+                current_sentence_id, latency, response_policy, f"亮度已调到{target}。"
+            )
+
+        return False
+
     def change_system_prompt(self, prompt):
         self.prompt = prompt
         # 更新系统prompt至上下文
@@ -1181,6 +1390,14 @@ class ConnectionHandler:
         functions, tool_route = self._select_routed_functions(
             query, depth, force_final_answer, latency
         )
+        if (
+            depth == 0
+            and tool_route is not None
+            and self._handle_deterministic_device_route(
+                query, tool_route, current_sentence_id, latency, response_policy
+            )
+        ):
+            return True
         use_function_call = functions is not None
 
         try:
