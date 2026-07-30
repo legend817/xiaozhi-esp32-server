@@ -6,18 +6,19 @@ def build_hotwords_message(raw_hotwords):
         return "", 0
 
     if isinstance(raw_hotwords, dict):
-        normalized = {}
+        items = []
         for word, weight in raw_hotwords.items():
             word = str(word).strip()
             if not word:
                 continue
             try:
-                normalized[word] = int(weight)
+                weight = int(weight)
             except (TypeError, ValueError):
-                normalized[word] = 20
+                weight = 20
+            items.append(f"{word} {weight}")
         return (
-            json.dumps(normalized, ensure_ascii=False) if normalized else "",
-            len(normalized),
+            json.dumps(items, ensure_ascii=False) if items else "",
+            len(items),
         )
 
     if isinstance(raw_hotwords, list):
