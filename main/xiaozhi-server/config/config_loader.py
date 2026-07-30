@@ -30,6 +30,14 @@ async def load_config():
     # 检查缓存
     cached_config = cache_manager.get(CacheType.CONFIG, "main_config")
     if cached_config is not None:
+        # 确保 API 客户端已初始化（缓存绕过 init_service）
+        from config.manage_api_client import ManageApiClient
+        if ManageApiClient._instance is None:
+            custom_config_path = get_project_dir() + "data/.config.yaml"
+            custom_config = read_config(custom_config_path)
+            if custom_config.get("manager-api", {}).get("url"):
+                from config.manage_api_client import init_service
+                init_service(custom_config)
         return cached_config
 
     default_config_path = get_project_dir() + "config.yaml"
@@ -41,6 +49,8 @@ async def load_config():
 
     if custom_config.get("manager-api", {}).get("url"):
         config = await get_config_from_api_async(custom_config)
+        # API 返回的配置可能缺失模型配置段（如 TTS），用默认配置补充
+        config = merge_configs(default_config, config)
     else:
         # 合并配置
         config = merge_configs(default_config, custom_config)
