@@ -34,7 +34,7 @@ docker compose -f deploy/docker-compose_all.yml up -d xiaozhi-esp32-server-db
 sleep 15
 
 # 导入数据（如果有备份文件）
-mysql -h127.0.0.1 -uroot -p123456 xiaozhi_esp32_server < xiaozhi_db_backup.sql
+docker exec -i xiaozhi-esp32-server-db mysql -uroot -p123456 xiaozhi_esp32_server < xiaozhi_db_backup.sql
 ```
 
 > 首次部署没有备份文件可跳过导入。系统启动后会自动建表，之后在智控台配置智能体即可。
@@ -171,7 +171,7 @@ server {
 git pull
 
 # 执行新增的数据库迁移（如果有）
-mysql -uroot -p xiaozhi_esp32_server < deploy/db-migrate-新文件.sql
+docker exec -i xiaozhi-esp32-server-db mysql -uroot -p123456 xiaozhi_esp32_server < deploy/db-migrate-新文件.sql
 
 # 重新构建 server 镜像
 docker build -f Dockerfile-server \
