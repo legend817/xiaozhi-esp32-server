@@ -801,7 +801,10 @@ class ConnectionHandler:
             # 异步获取差异化配置
             await self._initialize_private_config_async()
             # 在线程池中初始化组件
-            self.executor.submit(self._initialize_components)
+            if self.executor is not None:
+                self.executor.submit(self._initialize_components)
+            else:
+                self.logger.bind(tag=TAG).warning("后台初始化跳过: executor 已关闭")
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"后台初始化失败: {e}")
 
