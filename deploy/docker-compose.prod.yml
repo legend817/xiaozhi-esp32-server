@@ -1,0 +1,5 @@
+# 生产部署覆盖文件
+# 使用本地构建的自定义镜像，不覆盖远端 registry tag
+services:
+  xiaozhi-esp32-server:
+    image: xiaozhi-esp32-server:production
