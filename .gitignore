@@ -202,3 +202,5 @@ sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
 
 # 数据库备份（含用户数据，不入库）
 xiaozhi_db_backup.sql
+
+identity.csv
