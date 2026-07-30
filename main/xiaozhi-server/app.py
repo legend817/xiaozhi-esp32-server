@@ -10,6 +10,7 @@ from core.utils.util import get_local_ip, validate_mcp_endpoint
 from core.http_server import SimpleHttpServer
 from core.websocket_server import WebSocketServer
 from core.utils.util import check_ffmpeg_installed
+from core.utils.cache.warmup import warmup_from_ragflow
 from core.utils.gc_manager import get_gc_manager
 from core.utils.ragflow_http import ragflow_http_client_pool
 
@@ -45,6 +46,14 @@ async def monitor_stdin():
         await ainput()  # 异步等待输入，消费回车
 
 
+
+async def _warmup_cache(config):
+    """Warm up Redis cache from RAGFlow datasets (non-blocking)."""
+    try:
+        await warmup_from_ragflow(config)
+    except Exception as exc:
+        logger.bind(tag=TAG).warning("Cache warmup failed: {}", exc)
+
 async def main():
     check_ffmpeg_installed()
     config = await load_config()
@@ -79,6 +88,9 @@ async def main():
     # 启动 Simple http 服务器
     ota_server = SimpleHttpServer(config)
     ota_task = asyncio.create_task(ota_server.start())
+
+    # 任务启动后预热 Redis 缓存（不阻塞启动）
+    asyncio.create_task(_warmup_cache(config))
 
     read_config_from_api = config.get("read_config_from_api", False)
     port = int(config["server"].get("http_port", 8003))

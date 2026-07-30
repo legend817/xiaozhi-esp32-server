@@ -182,6 +182,9 @@ plugins:
     # RAGFlow检索上下文缓存；高频重复问题可省掉一次RAGFlow请求
     cache_enabled: true
     cache_ttl: 600
+    # RAG查询期间预播话术，多条用分号分隔，随机选一条
+    staged_first_reply: "我查一下知识库哈；让我查查资料；稍等一下，我找找；这个问题我查一下；我搜一下相关资料"
+    staged_first_reply_enabled: true
   # 联网搜索插件配置
   # 支持秘塔(metaso)和Tavily两个搜索源
   # 秘塔API Key申请：https://metaso.cn/search-api/api-keys

@@ -1,6 +1,7 @@
 import json
 import time
 import hashlib
+import random
 import re
 import httpx
 from config.logger import setup_logging
@@ -17,6 +18,7 @@ from core.utils.rag_context import (
     select_rag_contexts,
 )
 from core.utils.ragflow_http import ragflow_http_client_pool
+from core.utils.cache.warmup import match_warmup
 
 if TYPE_CHECKING:
     from core.connection import ConnectionHandler
@@ -109,9 +111,16 @@ async def search_from_ragflow(conn: "ConnectionHandler", question=None):
         "staged_first_reply_enabled",
         DEFAULT_STAGED_FIRST_REPLY_ENABLED,
     )
-    staged_first_reply = str(
+    staged_first_reply_raw = str(
         ragflow_config.get("staged_first_reply", DEFAULT_STAGED_FIRST_REPLY) or ""
     ).strip()
+    # 支持多话术：用 ; 分隔，每次随机选一条
+    if ";" in staged_first_reply_raw:
+        staged_first_reply = random.choice(
+            [p.strip() for p in staged_first_reply_raw.split(";") if p.strip()]
+        )
+    else:
+        staged_first_reply = staged_first_reply_raw
     direct_answer_min_similarity = _get_float_config(
         ragflow_config,
         "direct_answer_min_similarity",
@@ -140,6 +149,8 @@ async def search_from_ragflow(conn: "ConnectionHandler", question=None):
         10,
         300,
     )
+
+
     entity_term = extract_entity_query_term(question)
     direct_alias_category, direct_alias = build_enterprise_faq_cache_alias(question)
     retrieval_question = build_enterprise_faq_retrieval_question(
@@ -148,6 +159,18 @@ async def search_from_ragflow(conn: "ConnectionHandler", question=None):
     request_threshold = (
         entity_fallback_threshold if entity_term else similarity_threshold
     )
+
+    # 检查预热缓存（启动时从 RAGFlow 加载的 QA 对）
+    if question:
+        warmup_answer = match_warmup(question)
+        if warmup_answer:
+            logger.bind(tag=TAG).info(
+                "LATENCY event=warmup_direct_answer hit=true question={} chars={}",
+                question[:30],
+                len(warmup_answer),
+            )
+            return ActionResponse(Action.RESPONSE, None, warmup_answer)
+
 
     url = base_url + "/api/v1/retrieval"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}

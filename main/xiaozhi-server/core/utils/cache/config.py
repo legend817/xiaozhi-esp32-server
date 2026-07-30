@@ -64,7 +64,7 @@ class CacheConfig:
                 strategy=CacheStrategy.TTL, ttl=600, max_size=100  # 10分钟过期
             ),
             CacheType.RAGFLOW: cls(
-                strategy=CacheStrategy.TTL_LRU, ttl=600, max_size=500  # 10分钟过期
+                strategy=CacheStrategy.TTL_LRU, ttl=604800, max_size=5000  # 7天过期
             ),
         }
         return configs.get(cache_type, cls())

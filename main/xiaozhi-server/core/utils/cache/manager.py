@@ -1,17 +1,39 @@
 """
-全局缓存管理器
+Global cache manager with in-memory (L1) and Redis (L2) backends.
+
+Architecture:
+  L1 — in-memory OrderedDict (sub-µs, survives short Redis blips)
+  L2 — Redis (persistent across restarts, shared across instances)
+
+On read:
+  1. L1 hit → return immediately
+  2. L1 miss → try L2 (Redis)
+  3. L2 hit → promote to L1 → return
+  4. Both miss → return None
+
+On write:
+  Write to L1 synchronously, then L2.
+  L2 failure is non-fatal — next restart may need to warm again.
+
+TTL behaviour:
+  L1 honours TTL via CacheEntry expiry.
+  L2 (Redis) uses native EXPIRE/PEXPIRE so expired keys are
+  reclaimed automatically without periodic cleanup.
 """
 
 import time
+import json
 import threading
 from typing import Any, Optional, Dict
 from collections import OrderedDict
+
 from .strategies import CacheStrategy, CacheEntry
 from .config import CacheConfig, CacheType
+from .redis_client import redis_client
 
 
 class GlobalCacheManager:
-    """全局缓存管理器"""
+    """Global cache manager with L1 (in-memory) + L2 (Redis) backends."""
 
     def __init__(self):
         self._logger = None
@@ -20,197 +42,177 @@ class GlobalCacheManager:
         self._locks: Dict[str, threading.RLock] = {}
         self._global_lock = threading.RLock()
         self._last_cleanup = time.time()
-        self._stats = {"hits": 0, "misses": 0, "evictions": 0, "cleanups": 0}
+        self._stats = {"hits": 0, "misses": 0, "redis_hits": 0, "evictions": 0, "cleanups": 0}
+        # Nanosecond threshold: skip Redis for extremely short TTLs
+        self._redis_min_ttl = 30  # seconds
 
     @property
     def logger(self):
-        """延迟初始化 logger 以避免循环导入"""
         if self._logger is None:
             from config.logger import setup_logging
-
             self._logger = setup_logging()
         return self._logger
 
-    def _get_cache_name(self, cache_type: CacheType, namespace: str = "") -> str:
-        """生成缓存名称"""
-        if namespace:
-            return f"{cache_type.value}:{namespace}"
-        return cache_type.value
+    # ── key helpers ──────────────────────────────────────────────────
 
-    def _get_or_create_cache(
-        self, cache_name: str, config: CacheConfig
-    ) -> Dict[str, CacheEntry]:
-        """获取或创建缓存空间"""
+    @staticmethod
+    def _redis_key(cache_name: str, key: str) -> str:
+        return f"cache:{cache_name}:{key}"
+
+    @staticmethod
+    def _cache_name(cache_type: CacheType, namespace: str = "") -> str:
+        return f"{cache_type.value}:{namespace}" if namespace else cache_type.value
+
+    # ── L1 cache management ──────────────────────────────────────────
+
+    def _get_or_create_cache(self, cache_name: str, config: CacheConfig) -> Dict[str, CacheEntry]:
         with self._global_lock:
             if cache_name not in self._caches:
                 self._caches[cache_name] = (
-                    OrderedDict()
-                    if config.strategy in [CacheStrategy.LRU, CacheStrategy.TTL_LRU]
+                    OrderedDict() if config.strategy in (CacheStrategy.LRU, CacheStrategy.TTL_LRU)
                     else {}
                 )
                 self._configs[cache_name] = config
                 self._locks[cache_name] = threading.RLock()
             return self._caches[cache_name]
 
-    def set(
-        self,
-        cache_type: CacheType,
-        key: str,
-        value: Any,
-        ttl: Optional[float] = None,
-        namespace: str = "",
-    ) -> None:
-        """设置缓存值"""
-        cache_name = self._get_cache_name(cache_type, namespace)
-        config = self._configs.get(cache_name) or CacheConfig.for_type(cache_type)
+    def _set_l1(self, cache_name: str, key: str, entry: CacheEntry, config: CacheConfig):
         cache = self._get_or_create_cache(cache_name, config)
-
-        # 使用配置的TTL或传入的TTL
-        effective_ttl = ttl if ttl is not None else config.ttl
-
         with self._locks[cache_name]:
-            # 创建缓存条目
-            entry = CacheEntry(value=value, timestamp=time.time(), ttl=effective_ttl)
-
-            # 处理不同策略
-            if config.strategy in [CacheStrategy.LRU, CacheStrategy.TTL_LRU]:
-                # LRU策略：如果已存在则移动到末尾
+            if config.strategy in (CacheStrategy.LRU, CacheStrategy.TTL_LRU):
                 if key in cache:
                     del cache[key]
                 cache[key] = entry
-
-                # 检查大小限制
                 if config.max_size and len(cache) > config.max_size:
-                    # 移除最旧的条目
-                    oldest_key = next(iter(cache))
-                    del cache[oldest_key]
+                    oldest = next(iter(cache))
+                    del cache[oldest]
                     self._stats["evictions"] += 1
-
             else:
                 cache[key] = entry
-
-                # 检查大小限制
                 if config.max_size and len(cache) > config.max_size:
-                    # 简单策略：随机移除一个条目
-                    victim_key = next(iter(cache))
-                    del cache[victim_key]
+                    victim = next(iter(cache))
+                    del cache[victim]
                     self._stats["evictions"] += 1
 
-        # 定期清理过期条目
-        self._maybe_cleanup(cache_name)
-
-    def get(
-        self, cache_type: CacheType, key: str, namespace: str = ""
-    ) -> Optional[Any]:
-        """获取缓存值"""
-        cache_name = self._get_cache_name(cache_type, namespace)
-
-        if cache_name not in self._caches:
-            self._stats["misses"] += 1
+    def _get_l1(self, cache_name: str, key: str, config: CacheConfig) -> Optional[Any]:
+        cache = self._caches.get(cache_name)
+        if not cache:
             return None
-
-        cache = self._caches[cache_name]
-        config = self._configs[cache_name]
-
         with self._locks[cache_name]:
-            if key not in cache:
-                self._stats["misses"] += 1
+            entry = cache.get(key)
+            if entry is None:
                 return None
-
-            entry = cache[key]
-
-            # 检查过期
             if entry.is_expired():
                 del cache[key]
-                self._stats["misses"] += 1
                 return None
-
-            # 更新访问信息
             entry.touch()
-
-            # LRU策略：移动到末尾
-            if config.strategy in [CacheStrategy.LRU, CacheStrategy.TTL_LRU]:
+            if config.strategy in (CacheStrategy.LRU, CacheStrategy.TTL_LRU):
                 del cache[key]
                 cache[key] = entry
-
-            self._stats["hits"] += 1
             return entry.value
 
+    # ── public API ───────────────────────────────────────────────────
+
+    def set(self, cache_type: CacheType, key: str, value: Any,
+            ttl: Optional[float] = None, namespace: str = "") -> None:
+        cache_name = self._cache_name(cache_type, namespace)
+        config = self._configs.get(cache_name) or CacheConfig.for_type(cache_type)
+        effective_ttl = ttl if ttl is not None else config.ttl
+
+        entry = CacheEntry(value=value, timestamp=time.time(), ttl=effective_ttl)
+        self._set_l1(cache_name, key, entry, config)
+
+        # Write through to Redis if TTL is meaningful
+        if effective_ttl is None or effective_ttl >= self._redis_min_ttl:
+            rk = self._redis_key(cache_name, key)
+            redis_client.set(rk, value, ttl=effective_ttl)
+
+        self._maybe_cleanup(cache_name)
+
+    def get(self, cache_type: CacheType, key: str, namespace: str = "") -> Optional[Any]:
+        cache_name = self._cache_name(cache_type, namespace)
+
+        # 1. L1 hit
+        config = self._configs.get(cache_name) or CacheConfig.for_type(cache_type)
+        val = self._get_l1(cache_name, key, config)
+        if val is not None:
+            self._stats["hits"] += 1
+            return val
+
+        # 2. L2 (Redis) hit → promote to L1
+        rk = self._redis_key(cache_name, key)
+        redis_val = redis_client.get(rk)
+        if redis_val is not None:
+            self._stats["redis_hits"] += 1
+            # Re-promote to L1 using the cached config's TTL
+            cfg = self._configs.get(cache_name) or CacheConfig.for_type(cache_type)
+            entry = CacheEntry(value=redis_val, timestamp=time.time(), ttl=cfg.ttl)
+            self._set_l1(cache_name, key, entry, cfg)
+            return redis_val
+
+        self._stats["misses"] += 1
+        return None
+
     def delete(self, cache_type: CacheType, key: str, namespace: str = "") -> bool:
-        """删除缓存条目"""
-        cache_name = self._get_cache_name(cache_type, namespace)
-
-        if cache_name not in self._caches:
-            return False
-
-        cache = self._caches[cache_name]
-
-        with self._locks[cache_name]:
-            if key in cache:
-                del cache[key]
-                return True
-            return False
+        cache_name = self._cache_name(cache_type, namespace)
+        removed = False
+        # Remove from L1
+        cache = self._caches.get(cache_name)
+        if cache:
+            with self._locks.get(cache_name, threading.RLock()):
+                if key in cache:
+                    del cache[key]
+                    removed = True
+        # Remove from L2
+        rk = self._redis_key(cache_name, key)
+        redis_client.delete(rk)
+        return removed
 
     def clear(self, cache_type: CacheType, namespace: str = "") -> None:
-        """清空指定缓存"""
-        cache_name = self._get_cache_name(cache_type, namespace)
+        cache_name = self._cache_name(cache_type, namespace)
+        cache = self._caches.get(cache_name)
+        if cache:
+            with self._locks.get(cache_name, threading.RLock()):
+                cache.clear()
+        # Remove from Redis
+        pattern = f"cache:{cache_name}:*"
+        for rk in redis_client.keys(pattern):
+            redis_client.delete(rk)
 
-        if cache_name not in self._caches:
-            return
-
-        with self._locks[cache_name]:
-            self._caches[cache_name].clear()
-
-    def invalidate_pattern(
-        self, cache_type: CacheType, pattern: str, namespace: str = ""
-    ) -> int:
-        """按模式失效缓存条目"""
-        cache_name = self._get_cache_name(cache_type, namespace)
-
-        if cache_name not in self._caches:
-            return 0
-
-        cache = self._caches[cache_name]
-        deleted_count = 0
-
-        with self._locks[cache_name]:
-            keys_to_delete = [key for key in cache.keys() if pattern in key]
-            for key in keys_to_delete:
-                del cache[key]
-                deleted_count += 1
-
-        return deleted_count
-
-    def _cleanup_expired(self, cache_name: str) -> int:
-        """清理过期条目"""
-        if cache_name not in self._caches:
-            return 0
-
-        cache = self._caches[cache_name]
-        deleted_count = 0
-
-        with self._locks[cache_name]:
-            expired_keys = [key for key, entry in cache.items() if entry.is_expired()]
-            for key in expired_keys:
-                del cache[key]
-                deleted_count += 1
-
-        return deleted_count
+    def invalidate_pattern(self, cache_type: CacheType, pattern: str, namespace: str = "") -> int:
+        cache_name = self._cache_name(cache_type, namespace)
+        count = 0
+        cache = self._caches.get(cache_name)
+        if cache:
+            with self._locks.get(cache_name, threading.RLock()):
+                keys = [k for k in cache if pattern in k]
+                for k in keys:
+                    del cache[k]
+                    count += 1
+        # Remove from Redis
+        rk_pattern = f"cache:{cache_name}:*{pattern}*"
+        for rk in redis_client.keys(rk_pattern):
+            redis_client.delete(rk)
+            count += 1
+        return count
 
     def _maybe_cleanup(self, cache_name: str):
-        """定期清理检查"""
-        config = self._configs.get(cache_name)
-        if not config:
-            return
-
         now = time.time()
-        if now - self._last_cleanup > config.cleanup_interval:
+        if now - self._last_cleanup > 60:
             self._last_cleanup = now
-            deleted = self._cleanup_expired(cache_name)
-            if deleted > 0:
-                self._stats["cleanups"] += 1
-                self.logger.debug(f"清理缓存 {cache_name}: 删除 {deleted} 个过期条目")
+            cache = self._caches.get(cache_name)
+            if not cache:
+                return
+            with self._locks.get(cache_name, threading.RLock()):
+                expired = [k for k, e in cache.items() if e.is_expired()]
+                for k in expired:
+                    del cache[k]
+                if expired:
+                    self._stats["cleanups"] += 1
+
+    @property
+    def stats(self) -> dict:
+        return dict(self._stats)
 
 
-# 创建全局缓存管理器实例
 cache_manager = GlobalCacheManager()

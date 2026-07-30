@@ -14,5 +14,8 @@ COPY main/xiaozhi-server/ .
 # compose mounts a model file here, so remove the stale directory after copy.
 RUN rm -rf /opt/xiaozhi-esp32-server/models/SenseVoiceSmall/model.pt
 
+# 安装额外依赖（base image 不包含 redis）
+RUN pip install --no-cache-dir "redis>=5.0.0"
+
 # 启动应用
 CMD ["python", "app.py"]

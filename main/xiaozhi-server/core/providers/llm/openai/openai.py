@@ -62,6 +62,14 @@ class LLMProvider(LLMProviderBase):
             except (ValueError, TypeError):
                 setattr(self, param, None)
 
+        # 从配置中读取 extra_body（用于禁用思考模式等扩展参数）
+        self.extra_body = config.get("extra_body", None)
+        if self.extra_body is not None and isinstance(self.extra_body, str):
+            try:
+                import json
+                self.extra_body = json.loads(self.extra_body)
+            except (json.JSONDecodeError, TypeError):
+                self.extra_body = None
         logger.debug(
             f"意图识别参数初始化: {self.temperature}, {self.max_tokens}, {self.top_p}, {self.frequency_penalty}"
         )
@@ -80,7 +88,7 @@ class LLMProvider(LLMProviderBase):
         return dialogue
 
     def _apply_thinking_disabled(self, request_params: dict):
-        """根据域名自动禁用思考模式"""
+        """根据域名或配置禁用思考模式。"""
         parsed_url = urlparse(self.base_url)
         domain = parsed_url.netloc
         for disabled_domain, params in THINKING_DISABLED_DOMAINS.items():
@@ -88,6 +96,10 @@ class LLMProvider(LLMProviderBase):
                 request_params.setdefault("extra_body", {}).update(params)
                 logger.bind(tag=TAG).info(f"为域名 {domain} 禁用思考模式，参数: {params}")
                 break
+        # 配置驱动的 extra_body 覆盖（优先级最高）
+        if self.extra_body:
+            request_params.setdefault("extra_body", {}).update(self.extra_body)
+            logger.bind(tag=TAG).info(f"配置 extra_body: {self.extra_body}")
 
     def response(self, session_id, dialogue, **kwargs):
         dialogue = self.normalize_dialogue(dialogue)
