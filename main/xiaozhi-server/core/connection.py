@@ -752,15 +752,28 @@ class ConnectionHandler:
             self.logger.bind(tag=TAG).info("TTS上报线程已启动")
 
     def _initialize_tts(self):
-        """初始化TTS"""
+        """初始化TTS，失败时降级到 EdgeTTS"""
         tts = None
         if not self.need_bind:
-            tts = initialize_tts(self.config)
+            try:
+                tts = initialize_tts(self.config)
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(f"TTS初始化失败({e}), 降级到 EdgeTTS")
 
         if tts is None:
-            tts = DefaultTTS(self.config, delete_audio_file=True)
+            try:
+                tts = self._initialize_fallback_tts()
+            except Exception as e:
+                self.logger.bind(tag=TAG).error(f"EdgeTTS降级也失败了({e}), 使用静默TTS")
+                tts = DefaultTTS(self.config, delete_audio_file=True)
 
         return tts
+
+    def _initialize_fallback_tts(self):
+        """初始化 EdgeTTS 作为降级方案"""
+        from core.utils.modules_initialize import tts as tts_module
+        fallback_config = {"type": "edge", "voice": "zh-CN-XiaoxiaoNeural", "output_dir": "tmp/"}
+        return tts_module.create_instance("edge", fallback_config, True)
 
     def _initialize_asr(self):
         """初始化ASR"""

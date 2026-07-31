@@ -16,7 +16,7 @@ class FunASR2PassConfigTests(unittest.TestCase):
 
         self.assertEqual(2, count)
         self.assertEqual(
-            {"林晓锋": 30, "中科生创": 20},
+            ["林晓锋 30", "中科生创 20"],
             json.loads(message),
         )
 

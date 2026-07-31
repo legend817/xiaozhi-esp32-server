@@ -60,6 +60,7 @@ class ASRProvider(ASRProviderBase):
         self.chunk_interval = int(config.get("chunk_interval", 10))
         self.itn = str(config.get("itn", False)).lower() in ("true", "1", "yes")
         self.recv_timeout = float(config.get("recv_timeout", 8))
+        self.max_retries = int(config.get("max_retries", 2))
         self.hotwords_message, self.hotword_count = build_hotwords_message(
             config.get("hotwords")
         )
@@ -97,6 +98,16 @@ class ASRProvider(ASRProviderBase):
                 return
             except Exception as e:
                 logger.bind(tag=TAG).error(f"FunASR 2pass启动失败: {e}", exc_info=True)
+                # 重试
+                for attempt in range(self.max_retries):
+                    logger.bind(tag=TAG).info(f"FunASR 2pass重试 {attempt + 1}/{self.max_retries}")
+                    try:
+                        await asyncio.sleep(1 * (attempt + 1))
+                        await self._start_session(conn)
+                        await self._send_cached_audio(conn)
+                        return
+                    except Exception as retry_e:
+                        logger.bind(tag=TAG).warning(f"FunASR 2pass重试失败: {retry_e}")
                 await self._cleanup(conn)
                 return
 
@@ -108,8 +119,19 @@ class ASRProvider(ASRProviderBase):
             try:
                 await self.asr_ws.send(pcm_frame)
             except Exception as e:
-                logger.bind(tag=TAG).warning(f"FunASR 2pass发送音频失败: {e}")
+                logger.bind(tag=TAG).warning(f"FunASR 2pass发送音频失败({e})，尝试重连")
                 await self._cleanup(conn)
+                # 尝试重新建立会话
+                for attempt in range(self.max_retries):
+                    try:
+                        await asyncio.sleep(1 * (attempt + 1))
+                        logger.bind(tag=TAG).info(f"FunASR 2pass重连尝试 {attempt + 1}/{self.max_retries}")
+                        await self._start_session(conn)
+                        await self._send_cached_audio(conn)
+                        await self.asr_ws.send(pcm_frame)
+                        return
+                    except Exception as retry_e:
+                        logger.bind(tag=TAG).warning(f"FunASR 2pass重连失败: {retry_e}")
                 return
 
     async def _start_session(self, conn: "ConnectionHandler"):
