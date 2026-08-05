@@ -33,6 +33,9 @@ async def warmup_from_ragflow(config: dict):
     base_url = ragflow_config.get("base_url", "")
     api_key = ragflow_config.get("api_key", "")
     dataset_ids = _normalize_ids(ragflow_config.get("dataset_ids", []))
+    # 跳过配置中的占位符（如 123456789）
+    placeholders = {"123456789", "你的dataset_id", "ragflow-xxx"}
+    dataset_ids = [d for d in dataset_ids if d not in placeholders]
 
     if not base_url or not api_key or not dataset_ids:
         logger.info("warmup skipped: no RAGFlow datasets configured")
