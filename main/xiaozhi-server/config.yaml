@@ -901,6 +901,20 @@ TTS:
       post_process:
         pitch: 0  # 音高(-12~12)
     # language: "中文"  # 指定输出语种,如:中文、英语、日语、韩语等,请根据所选音色支持的语言进行设置,不填则默认为中文
+  # Triton Inference Server + CosyVoice2 decoupled 流式语音合成
+  TritonCosyVoiceTTS:
+    type: triton_cosyvoice
+    # Triton gRPC 地址（不要填 http://）
+    server: 82.156.31.182:28001
+    model_name: cosyvoice2
+    # CosyVoice2 Triton 运行时默认输出 24 kHz waveform
+    sample_rate: 24000
+    # 参考音频可选；配置时必须是 16 kHz、16-bit PCM WAV
+    reference_audio: ""
+    reference_text: ""
+    # 仅用作本地唤醒词音频缓存标识，不会传给 Triton
+    voice: triton_cosyvoice
+    request_timeout: 30
   CosyVoiceSiliconflow:
     type: siliconflow
     # 硅基流动TTS

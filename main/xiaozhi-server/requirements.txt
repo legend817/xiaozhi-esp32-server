@@ -43,3 +43,5 @@ Jinja2==3.1.6
 vosk==0.3.45
 #--------- redis 缓存后端
 redis>=5.0.0
+# Triton decoupled streaming gRPC client
+tritonclient==2.65.0

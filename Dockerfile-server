@@ -15,7 +15,9 @@ COPY main/xiaozhi-server/ .
 RUN rm -rf /opt/xiaozhi-esp32-server/models/SenseVoiceSmall/model.pt
 
 # 安装额外依赖（base image 不包含 redis）
-RUN pip install --no-cache-dir "redis>=5.0.0"
+RUN pip install --no-cache-dir \
+    "redis>=5.0.0" \
+    "tritonclient==2.65.0"
 
 # 启动应用
 CMD ["python", "app.py"]
