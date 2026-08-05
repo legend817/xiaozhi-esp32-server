@@ -16,6 +16,37 @@ manager-web。密码等登录凭据未写入仓库。
 
 ## 服务端代码改动
 
+### 默认音色切换为湾湾小何
+
+模型目录中的 `spk2info.pt` 已包含缓存键 `xiaohe`：
+
+- 名称：湾湾小何
+- 缓存键：`xiaohe`
+- 参考文本：`今天天气真是太好了，阳光灿烂心情超级棒`
+
+默认请求不传 `reference_wav` 时，编排模型负责读取提示文本和 speech token，
+token2wav 负责读取 speech feat 和 speaker embedding，因此两处必须使用同一个
+缓存键：
+
+```diff
+# model_repo/cosyvoice2/1/model.py
+-        self.default_spk_info = spk_info["001"]
++        self.default_spk_info = spk_info["xiaohe"]
+
+# model_repo/token2wav/1/model.py
+-        self.default_spk_info = spk_info["001"]
++        self.default_spk_info = spk_info["xiaohe"]
+```
+
+切换前的模板备份为：
+
+- `model_repo/cosyvoice2/1/model.py.codex-backup-before-xiaohe-20260806`
+- `model_repo/token2wav/1/model.py.codex-backup-before-xiaohe-20260806`
+
+重启后已确认生成目录中的两个模型均加载 `xiaohe`。默认请求生成了 10 个
+waveform chunk、5.52 秒 24kHz 单声道音频；四个 Python 实例预热完成后的
+localhost 首块延迟恢复到约 200ms。
+
 ### 1. 缩短首个音频块等待时间
 
 ```diff
@@ -117,6 +148,17 @@ PCM waveform chunk 由 xiaozhi-server 收到后立即编码为 Opus 帧发送给
 不会在服务端重新拼接完整 WAV。
 
 ## 回退方式
+
+只回退默认音色、保留流式优化：
+
+```bash
+cd ~/CosyVoice/runtime/triton_trtllm
+cp model_repo/cosyvoice2/1/model.py.codex-backup-before-xiaohe-20260806 \
+  model_repo/cosyvoice2/1/model.py
+cp model_repo/token2wav/1/model.py.codex-backup-before-xiaohe-20260806 \
+  model_repo/token2wav/1/model.py
+sudo docker compose -f docker-compose.cosyvoice2.unet.yml restart tts
+```
 
 如发现音质、并发能力或播放稳定性异常，可恢复备份并重启：
 
