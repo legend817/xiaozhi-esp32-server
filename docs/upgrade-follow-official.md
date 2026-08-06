@@ -1,7 +1,13 @@
 # 跟随 xiaozhi 官方升级流程
 
 本文适用于在本地 `zksc` 分支维护自定义改动，同时需要跟随
-`xinnan-tech/xiaozhi-esp32-server` 官方 `main` 升级的情况。
+`xinnan-tech/xiaozhi-esp32-server` 官方 release/tag 升级的情况。
+
+升级策略：
+
+- 以官方发布的稳定 tag/release 为准，不随时合并官方 `main`。
+- 官方 `main` 可能包含未发布或不稳定改动，日常开发不主动跟随。
+- 只有官方发布新版本后，才在 `zksc` 上合并对应的官方 tag。
 
 ## 一、仓库结构
 
@@ -11,7 +17,7 @@
 
 升级原则：
 
-- 不直接用官方 `main` 覆盖 `zksc`。
+- 不直接用官方 `main` 覆盖 `zksc`，只合并明确的官方 tag/release。
 - 不把官方初始化 SQL 直接覆盖现有数据库。
 - 数据库升级优先使用官方 Liquibase 新增变更，不手工重跑全部旧初始化 SQL。
 - 升级后保留自定义模型配置、音色、智能体、密钥等数据。
@@ -39,16 +45,30 @@ git stash
 ## 三、拉取官方更新
 
 ```bash
-git fetch upstream
-git diff --stat upstream/main...zksc
+git fetch upstream --tags
+git tag -l --sort=-v:refname | head -20
 ```
 
-先确认官方改动范围，再执行合并。
+先查看官方最新 tag，例如：
 
-## 四、合并官方 main 到 zksc
+```text
+v0.9.6
+v0.9.5
+...
+```
+
+确认要升级的版本后，再查看该 tag 与 `zksc` 的差异：
 
 ```bash
-git merge upstream/main
+OFFICIAL_TAG="v0.9.6"
+git diff --stat "upstream/${OFFICIAL_TAG}"...zksc
+```
+
+## 四、合并官方 tag 到 zksc
+
+```bash
+OFFICIAL_TAG="v0.9.6"
+git merge "upstream/${OFFICIAL_TAG}"
 ```
 
 出现冲突时：
@@ -61,7 +81,7 @@ git status
 
 ```bash
 git add <冲突文件>
-git commit -m "merge: 合并 upstream/main 到 zksc"
+git commit -m "merge: 合并官方 ${OFFICIAL_TAG} 到 zksc"
 ```
 
 重点核对本地修改过的文件：
@@ -85,7 +105,8 @@ docker exec xiaozhi-esp32-server-db mysqldump \
 ### 2. 查看官方新增的数据库变更
 
 ```bash
-git diff --name-only upstream/main...HEAD -- \
+OFFICIAL_TAG="v0.9.6"
+git diff --name-only "upstream/${OFFICIAL_TAG}"...HEAD -- \
   main/manager-api/src/main/resources/db/changelog \
   'deploy/*.sql'
 ```
@@ -134,10 +155,25 @@ docker compose -f deploy/docker-compose_all.yml -f deploy/docker-compose.dev.yml
   up -d --no-deps --force-recreate xiaozhi-esp32-server
 ```
 
-如果官方改了 manager-api/manager-web，还需要更新或重建
-`xiaozhi-esp32-server-web`：
+如果官方改了 manager-api/manager-web，优先拉取官方已经发布的对应 web 镜像：
 
 ```bash
+docker pull ghcr.nju.edu.cn/xinnan-tech/xiaozhi-esp32-server:web_latest
+
+docker compose -f deploy/docker-compose_all.yml \
+  up -d --no-deps --force-recreate xiaozhi-esp32-server-web
+```
+
+如果官方镜像还没更新，或 `zksc` 上有本地 `manager-api`/`manager-web`
+改动，才需要本地编译 web 镜像：
+
+```bash
+WEB_TAG="$(git rev-parse --short HEAD)-dev"
+docker build -f Dockerfile-web -t "xiaozhi-esp32-server-web:${WEB_TAG}" .
+
+docker tag "xiaozhi-esp32-server-web:${WEB_TAG}" \
+  ghcr.nju.edu.cn/xinnan-tech/xiaozhi-esp32-server:web_latest
+
 docker compose -f deploy/docker-compose_all.yml \
   up -d --no-deps --force-recreate xiaozhi-esp32-server-web
 ```
@@ -196,17 +232,21 @@ git commit -m "chore: 升级前提交当前改动"
 ### 2. 拉取官方最新代码
 
 ```bash
-git fetch upstream
-git diff --stat upstream/main...zksc
+git fetch upstream --tags
+git tag -l --sort=-v:refname | head -20
+
+OFFICIAL_TAG="v0.9.6"
+git diff --stat "upstream/${OFFICIAL_TAG}"...zksc
 ```
 
-先看差异规模，不要直接合并。
+先确认要升级的官方 tag，再查看差异规模，不要随时合并 `upstream/main`。
 
 ### 3. 创建测试分支，试合并
 
 ```bash
 git switch -c merge-test zksc
-git merge --no-commit upstream/main
+OFFICIAL_TAG="v0.9.6"
+git merge --no-commit "upstream/${OFFICIAL_TAG}"
 ```
 
 这一步不会自动提交。查看合并状态：
@@ -230,7 +270,7 @@ git branch -D merge-test
 `db.changelog-master.yaml`：
 
 - `zksc` 新增了 `202607291535`
-- `upstream/main` 新增了 `202607290930`
+- 官方 tag 新增了 `202607290930`
 
 处理方式：两个 changeset 都保留，官方 `202607290930` 放前面，自己的
 `202607291535` 放后面。
@@ -238,7 +278,7 @@ git branch -D merge-test
 `plugin_executor.py`：
 
 - `zksc` 用 `plugin_configs.get(func_name, {}).get("description", "")`
-- `upstream/main` 用 `self._get_plugin_description(func_name)`
+- 官方 tag 用 `self._get_plugin_description(func_name)`
 
 处理方式：采用官方的 `_get_plugin_description()`，因为它支持模块名和函数名
 双层查找，兼容性更好。
@@ -247,14 +287,14 @@ git branch -D merge-test
 
 ```bash
 git add <冲突文件>
-git commit -m "merge: 试合并 upstream/main"
+git commit -m "merge: 试合并官方 ${OFFICIAL_TAG}"
 ```
 
 ### 5. 合并回 zksc
 
 ```bash
 git switch zksc
-git merge --no-ff merge-test -m "merge: 合并 upstream/main 到 zksc"
+git merge --no-ff merge-test -m "merge: 合并官方 ${OFFICIAL_TAG} 到 zksc"
 git branch -D merge-test
 ```
 
@@ -269,15 +309,34 @@ docker exec xiaozhi-esp32-server-db mysqldump \
 ### 7. 查看官方新增数据库变更
 
 ```bash
-git diff --name-only upstream/main...HEAD -- \
+OFFICIAL_TAG="v0.9.6"
+git diff --name-only "upstream/${OFFICIAL_TAG}"...HEAD -- \
   main/manager-api/src/main/resources/db/changelog \
   'deploy/*.sql'
 ```
 
 ### 8. 构建本地 web 镜像并让 Liquibase 自动迁移
 
-如果当前 `web_latest` 镜像比较旧，jar 里没有官方新增 changelog，就必须用
-合并后的源码重新构建 web。
+先判断是否需要重新构建 web：
+
+```bash
+OFFICIAL_TAG="v0.9.6"
+git diff --name-only "upstream/${OFFICIAL_TAG}"...HEAD -- \
+  main/manager-api main/manager-web \
+  Dockerfile-web docs/docker/nginx.conf
+```
+
+如果没有输出，优先拉取官方 `web_latest` 镜像：
+
+```bash
+docker pull ghcr.nju.edu.cn/xinnan-tech/xiaozhi-esp32-server:web_latest
+
+docker compose -f deploy/docker-compose_all.yml \
+  up -d --no-deps --force-recreate xiaozhi-esp32-server-web
+```
+
+如果官方镜像比较旧，jar 里没有官方新增 changelog，或 `zksc` 上有本地
+`manager-api`/`manager-web` 改动，才用合并后的源码重新构建 web。
 
 先确认 `.dockerignore` 不要排除 `main/manager-api` 和 `main/manager-web`：
 
