@@ -11,8 +11,6 @@ data/
 deploy/
 
 # Modules that are not copied by Dockerfile-server.
-main/manager-api/
-main/manager-web/
 main/manager-mobile/
 main/digital-human/
 
