@@ -14,6 +14,7 @@ from core.utils.asr_text import (
     apply_text_corrections,
     build_hotwords_message,
     build_text_corrections,
+    normalize_chunk_size,
 )
 
 if TYPE_CHECKING:
@@ -56,7 +57,9 @@ class ASRProvider(ASRProviderBase):
             self.ssl_context.verify_mode = ssl.CERT_NONE
 
         self.mode = config.get("mode", "2pass")
-        self.chunk_size = config.get("chunk_size", [5, 10, 5])
+        self.chunk_size = normalize_chunk_size(
+            config.get("chunk_size", [5, 10, 5])
+        )
         self.chunk_interval = int(config.get("chunk_interval", 10))
         self.itn = str(config.get("itn", False)).lower() in ("true", "1", "yes")
         self.recv_timeout = float(config.get("recv_timeout", 8))
@@ -97,7 +100,11 @@ class ASRProvider(ASRProviderBase):
                 await self._send_cached_audio(conn)
                 return
             except Exception as e:
-                logger.bind(tag=TAG).error(f"FunASR 2pass启动失败: {e}", exc_info=True)
+                logger.bind(tag=TAG).error(
+                    "FunASR 2pass启动失败: "
+                    f"{type(e).__name__}: {e!r}",
+                    exc_info=True,
+                )
                 # 重试
                 for attempt in range(self.max_retries):
                     logger.bind(tag=TAG).info(f"FunASR 2pass重试 {attempt + 1}/{self.max_retries}")
@@ -107,7 +114,10 @@ class ASRProvider(ASRProviderBase):
                         await self._send_cached_audio(conn)
                         return
                     except Exception as retry_e:
-                        logger.bind(tag=TAG).warning(f"FunASR 2pass重试失败: {retry_e}")
+                        logger.bind(tag=TAG).warning(
+                            "FunASR 2pass重试失败: "
+                            f"{type(retry_e).__name__}: {retry_e!r}"
+                        )
                 await self._cleanup(conn)
                 return
 
@@ -119,7 +129,10 @@ class ASRProvider(ASRProviderBase):
             try:
                 await self.asr_ws.send(pcm_frame)
             except Exception as e:
-                logger.bind(tag=TAG).warning(f"FunASR 2pass发送音频失败({e})，尝试重连")
+                logger.bind(tag=TAG).warning(
+                    "FunASR 2pass发送音频失败"
+                    f"({type(e).__name__}: {e!r})，尝试重连"
+                )
                 await self._cleanup(conn)
                 # 尝试重新建立会话
                 for attempt in range(self.max_retries):
@@ -131,7 +144,10 @@ class ASRProvider(ASRProviderBase):
                         await self.asr_ws.send(pcm_frame)
                         return
                     except Exception as retry_e:
-                        logger.bind(tag=TAG).warning(f"FunASR 2pass重连失败: {retry_e}")
+                        logger.bind(tag=TAG).warning(
+                            "FunASR 2pass重连失败: "
+                            f"{type(retry_e).__name__}: {retry_e!r}"
+                        )
                 return
 
     async def _start_session(self, conn: "ConnectionHandler"):
@@ -244,8 +260,11 @@ class ASRProvider(ASRProviderBase):
                         logger.bind(tag=TAG).warning("FunASR 2pass等待最终结果超时")
                         break
                     continue
-                except websockets.ConnectionClosed:
-                    logger.bind(tag=TAG).info("FunASR 2pass连接已关闭")
+                except websockets.ConnectionClosed as e:
+                    logger.bind(tag=TAG).info(
+                        "FunASR 2pass连接已关闭: "
+                        f"code={e.code}, reason={e.reason!r}"
+                    )
                     break
                 except Exception as e:
                     logger.bind(tag=TAG).error(f"FunASR 2pass处理结果失败: {e}", exc_info=True)

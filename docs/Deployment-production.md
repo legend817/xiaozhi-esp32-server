@@ -170,7 +170,7 @@ print(f'预热缓存: {len(keys)} 条')
 |------|------|
 | 改配置不生效 | 第三步没做：必须先 `FLUSHDB` 再重启 server |
 | ESP32 连不上 | 检查安全组 8000 端口，`.config.yaml` 中 `websocket` 地址 |
-| 远程 FunASR 崩溃 | 检查 MySQL 中 `chunk_size` 是数组 `[5,10,5]` 不是字符串 `"5,10,5"`；执行迁移脚本 |
+| 远程 FunASR 崩溃 | 检查 MySQL 中 `chunk_size` 是数组 `[5,10,5]` 不是字符串 `"5,10,5"`；执行 `deploy/db-fix-funasr-2pass-20260806.sql` |
 | 预热未加载 | 检查智控台中 `search_from_ragflow` 配置 |
 | VAD 截断说话 | 调大 `min_silence_duration_ms`（智控台→模型管理→VAD_SileroVAD） |
 

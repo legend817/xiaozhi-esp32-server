@@ -1,6 +1,29 @@
 import json
 
 
+def normalize_chunk_size(chunk_size):
+    if isinstance(chunk_size, str):
+        chunk_size = chunk_size.strip().strip("[]")
+        try:
+            return [int(value.strip()) for value in chunk_size.split(",")]
+        except ValueError as e:
+            raise ValueError(
+                "FunASR chunk_size 必须是逗号分隔的整数，例如 5,10,5"
+            ) from e
+
+    if isinstance(chunk_size, (list, tuple)):
+        try:
+            return [int(value) for value in chunk_size]
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                "FunASR chunk_size 必须是整数列表，例如 [5, 10, 5]"
+            ) from e
+
+    raise ValueError(
+        "FunASR chunk_size 必须是整数列表或逗号分隔的整数，例如 5,10,5"
+    )
+
+
 def build_hotwords_message(raw_hotwords):
     if not raw_hotwords:
         return "", 0
