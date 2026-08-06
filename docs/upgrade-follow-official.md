@@ -177,3 +177,232 @@ docker exec xiaozhi-esp32-server-db mysqldump \
 - 本地自定义配置优先保存在 manager-api 数据库中，不写死在代码里。
 - 官方升级改到本地已修改文件时，必须人工确认冲突，避免丢失之前的修复。
 - 升级前先备份数据库和 `deploy/data/.config.yaml`。
+
+## 十、实操版：完整执行顺序（2026-08-06 已走通）
+
+下面是本次实际执行并验证通过的完整流程，适合一步一步照做。
+
+### 1. 提交当前本地工作
+
+```bash
+git switch zksc
+git status
+git add .
+git commit -m "chore: 升级前提交当前改动"
+```
+
+如果有不想提交的本地文件，先移出仓库目录，或加入 `.gitignore`。
+
+### 2. 拉取官方最新代码
+
+```bash
+git fetch upstream
+git diff --stat upstream/main...zksc
+```
+
+先看差异规模，不要直接合并。
+
+### 3. 创建测试分支，试合并
+
+```bash
+git switch -c merge-test zksc
+git merge --no-commit upstream/main
+```
+
+这一步不会自动提交。查看合并状态：
+
+```bash
+git status
+```
+
+如果冲突太多，可以安全放弃：
+
+```bash
+git merge --abort
+git switch zksc
+git branch -D merge-test
+```
+
+### 4. 处理冲突
+
+本次实测遇到两个冲突：
+
+`db.changelog-master.yaml`：
+
+- `zksc` 新增了 `202607291535`
+- `upstream/main` 新增了 `202607290930`
+
+处理方式：两个 changeset 都保留，官方 `202607290930` 放前面，自己的
+`202607291535` 放后面。
+
+`plugin_executor.py`：
+
+- `zksc` 用 `plugin_configs.get(func_name, {}).get("description", "")`
+- `upstream/main` 用 `self._get_plugin_description(func_name)`
+
+处理方式：采用官方的 `_get_plugin_description()`，因为它支持模块名和函数名
+双层查找，兼容性更好。
+
+解决冲突后：
+
+```bash
+git add <冲突文件>
+git commit -m "merge: 试合并 upstream/main"
+```
+
+### 5. 合并回 zksc
+
+```bash
+git switch zksc
+git merge --no-ff merge-test -m "merge: 合并 upstream/main 到 zksc"
+git branch -D merge-test
+```
+
+### 6. 备份数据库
+
+```bash
+docker exec xiaozhi-esp32-server-db mysqldump \
+  --single-transaction --routines --triggers --events --set-gtid-purged=OFF \
+  -uroot -p123456 xiaozhi_esp32_server > deploy/db-backup-before-upgrade-$(date +%Y%m%d).sql
+```
+
+### 7. 查看官方新增数据库变更
+
+```bash
+git diff --name-only upstream/main...HEAD -- \
+  main/manager-api/src/main/resources/db/changelog \
+  'deploy/*.sql'
+```
+
+### 8. 构建本地 web 镜像并让 Liquibase 自动迁移
+
+如果当前 `web_latest` 镜像比较旧，jar 里没有官方新增 changelog，就必须用
+合并后的源码重新构建 web。
+
+先确认 `.dockerignore` 不要排除 `main/manager-api` 和 `main/manager-web`：
+
+```text
+# Modules that are not copied by Dockerfile-server.
+main/manager-mobile/
+main/digital-human/
+```
+
+构建 web 镜像：
+
+```bash
+WEB_TAG="$(git rev-parse --short HEAD)-dev"
+docker build -f Dockerfile-web -t "xiaozhi-esp32-server-web:${WEB_TAG}" .
+```
+
+由于 compose 的 web 服务固定使用 `web_latest` 镜像，本地测试环境可以把本地
+镜像临时标记成 `web_latest`：
+
+```bash
+docker tag "xiaozhi-esp32-server-web:${WEB_TAG}" \
+  ghcr.nju.edu.cn/xinnan-tech/xiaozhi-esp32-server:web_latest
+```
+
+重启 web：
+
+```bash
+docker compose -f deploy/docker-compose_all.yml \
+  up -d --no-deps --force-recreate xiaozhi-esp32-server-web
+```
+
+查看 web 日志，确认 Liquibase 执行：
+
+```bash
+docker logs --tail 100 xiaozhi-esp32-server-web
+```
+
+正常情况会看到：
+
+```text
+Running Changeset: db/changelog/db.changelog-master.yaml::202607290930::cgd
+SQL in file classpath:db/changelog/202607290930.sql executed
+```
+
+确认 `DATABASECHANGELOG` 已记录官方路径：
+
+```sql
+SELECT ID, AUTHOR, FILENAME, DATEEXECUTED, ORDEREXECUTED, MD5SUM
+FROM DATABASECHANGELOG
+WHERE ID = '202607290930';
+```
+
+`FILENAME` 必须是：
+
+```text
+db/changelog/db.changelog-master.yaml
+```
+
+不要使用临时 changelog 路径手动执行，否则 `FILENAME` 会变成
+`file:/tmp/...`，后续官方 Liquibase 会误判未执行并重复运行。
+
+### 9. 构建并重启 server
+
+```bash
+DEV_TAG="$(git rev-parse --short HEAD)-dev"
+
+env XIAOZHI_DEV_TAG="${DEV_TAG}" \
+docker compose -f deploy/docker-compose_all.yml -f deploy/docker-compose.dev.yml \
+  build xiaozhi-esp32-server
+
+env XIAOZHI_DEV_TAG="${DEV_TAG}" \
+docker compose -f deploy/docker-compose_all.yml -f deploy/docker-compose.dev.yml \
+  up -d --no-deps --force-recreate xiaozhi-esp32-server
+```
+
+查看 server 日志：
+
+```bash
+docker logs --tail 100 xiaozhi-esp32-server
+```
+
+日志里应显示：
+
+```text
+源码版本		ffcdae83-dev
+```
+
+### 10. 清 Redis
+
+```bash
+docker exec xiaozhi-esp32-server-redis redis-cli FLUSHALL
+```
+
+### 11. 验证服务
+
+```bash
+docker ps
+docker logs --tail 80 xiaozhi-esp32-server-web
+docker logs --tail 80 xiaozhi-esp32-server
+```
+
+web 容器内检查智控台：
+
+```bash
+docker exec xiaozhi-esp32-server-web sh -c \
+  'wget -qO- --timeout=3 http://127.0.0.1:8002/ | head -5'
+```
+
+### 12. 提交剩余改动并推送
+
+```bash
+git status
+git add .dockerignore
+git commit -m "build: 允许 web 镜像构建使用 manager-api/manager-web 源码"
+git push origin zksc
+```
+
+数据库备份文件按项目约定保留本地，不要提交到仓库。
+
+### 13. 升级后重新生成初始化 SQL
+
+```bash
+docker exec xiaozhi-esp32-server-db mysqldump \
+  --single-transaction --routines --triggers --events --set-gtid-purged=OFF \
+  -uroot -p123456 xiaozhi_esp32_server > deploy/db-init-current-$(date +%Y%m%d).sql
+```
+
+生成后导入临时库验证表数量和关键数据 checksum。
