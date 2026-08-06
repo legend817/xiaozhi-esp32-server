@@ -1,5 +1,7 @@
 # Triton CosyVoice2 服务端流式优化记录
 
+> 音色添加、智控台配置和在线试听流程见 [Triton CosyVoice 音色指南](./triton-cosyvoice-voice-guide.md)。
+
 ## 变更信息
 
 - 变更日期：2026-08-06

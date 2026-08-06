@@ -4,6 +4,8 @@
 
 本文只记录当前应该遵守的开发方式和优化方向。历史测试细节保留在其它 `docs/*.md` 中。
 
+跟随官方升级流程见 [docs/upgrade-follow-official.md](./upgrade-follow-official.md)。
+
 ## 开发边界
 
 - 当前只改 `main/xiaozhi-server` 后端。
