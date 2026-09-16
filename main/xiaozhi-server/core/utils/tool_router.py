@@ -63,6 +63,40 @@ def _enterprise_subject_hints(description: Optional[str]) -> List[str]:
     return hints
 
 
+def _is_visual_request(text: str) -> bool:
+    """Recognize requests to inspect the current scene, not camera discussion."""
+    text = re.sub(r"[\s，。！？、,.!?：:]+", "", text)
+    # Negated capture and camera advice must not open the user's camera.
+    if re.search(r"(?:不要|不用|别|不必|禁止|停止|取消|关闭|关掉).{0,8}(?:看|拍|摄像头|相机|识别)", text):
+        return False
+    if re.search(r"(?:怎么|如何|怎样|为什么|原理|教程|推荐|购买|多少钱|隐私|权限).*(?:摄像头|相机|拍照)|(?:摄像头|相机|拍照).*(?:怎么|如何|怎样|为什么|原理|教程|推荐|多少钱|权限)", text):
+        return False
+
+    # Explicit capture requests are unambiguous even when e.g. weather is visible.
+    if re.search(r"(?:打开|开启|启动|调用|用|通过).{0,4}(?:摄像头|相机)|拍(?:照|一?张(?:照|照片|相片))", text):
+        return True
+
+    # "看看" alone is not visual intent: keep information queries on their routes.
+    if _contains_any(text, ["天气", "气温", "几点", "时间", "日期", "新闻", "热搜", "股票", "股价", "汇率"]):
+        return False
+    if re.search(r"(?:周围|附近|周边).*(?:推荐|餐厅|饭店|酒店|导航|路线)", text):
+        return False
+    if re.search(r"这是什么(?:意思|原理|概念|情况)", text):
+        return False
+
+    look = r"(?:看看|看一下|看一看|瞧瞧|瞧一下|观察|识别|辨认|描述|看清|看见|看到|看得见|能看|看下|看)"
+    scene = r"(?:周围|四周|周边|面前|眼前|前面|旁边|这里|这边|我这|房间|桌上|桌面|手里|手上|手中|拿着|拿的|拿了|举着|穿的|穿着|这是什么|这个|这张|这个东西)"
+    if re.search(look + r".{0,12}" + scene, text):
+        return True
+    if re.search(r"(?:面前|眼前|手里|手上|手中|拿着|拿的|拿了|举着|穿的|穿着|桌上|桌面).{0,12}(?:什么|颜色|几个|多少|看清|看见|看到)", text):
+        return True
+    if re.search(r"(?:这是什么|这(?:个|东西|是什么东西)(?:是啥|是什么)|你能看见我吗|你看得到我吗)", text):
+        return True
+    if re.search(r"(?:看|读|识别|读取|分析|解读).{0,12}(?:体检报告|检查报告|这张照片|这张图片|上面的字|上面的文字|这行字|文字)", text):
+        return True
+    return False
+
+
 def build_tool_route(
     query: Optional[str],
     available_tool_names: Iterable[str],
@@ -94,25 +128,7 @@ def build_tool_route(
     # 视觉类：拍照、查看实物/图片、读取报告或可见文字。
     # 只在客户端确实提供摄像头工具时命中；否则回退普通对话，避免
     # 把没有摄像头的终端路由到一个永远无法执行的工具。
-    if _contains_any(
-        text,
-        [
-            "摄像头",
-            "相机",
-            "拍照",
-            "拍张照片",
-            "照片",
-            "图片",
-            "体检报告",
-            "检查报告",
-            "识别文字",
-            "读取文字",
-            "读一下这",
-            "看一下这",
-            "帮我看看这",
-            "这是什么",
-        ],
-    ):
+    if _is_visual_request(text):
         return pick(
             "vision",
             ["self_camera_take_photo"],
