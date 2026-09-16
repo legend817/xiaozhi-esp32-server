@@ -44,5 +44,24 @@ class ToolRouterEnterpriseRagTest(unittest.TestCase):
         self.assertEqual([], route.tool_names)
 
 
+class ToolRouterVisionTest(unittest.TestCase):
+    def test_visual_requests_select_camera_tool(self):
+        for question in ("请调用摄像头拍一张照片", "帮我看看这是什么", "读取体检报告上的文字"):
+            with self.subTest(question=question):
+                route = build_tool_route(question, ["self_camera_take_photo"])
+                self.assertEqual("vision", route.name)
+                self.assertEqual(["self_camera_take_photo"], route.tool_names)
+
+    def test_visual_request_without_camera_stays_direct(self):
+        route = build_tool_route("帮我看看这是什么", ["self.get_device_status"])
+        self.assertEqual("direct_llm", route.name)
+        self.assertEqual([], route.tool_names)
+
+    def test_visual_route_does_not_change_unrelated_chat(self):
+        route = build_tool_route("请给我讲一个故事", ["self_camera_take_photo"])
+        self.assertEqual("direct_llm", route.name)
+        self.assertEqual([], route.tool_names)
+
+
 if __name__ == "__main__":
     unittest.main()

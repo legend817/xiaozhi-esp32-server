@@ -91,6 +91,34 @@ def build_tool_route(
     if _contains_any(text, ["再见", "拜拜", "退出", "结束对话", "别说了", "退下", "待机", "晚安"]):
         return pick("exit", ["handle_exit_intent"], "matched_exit_keywords")
 
+    # 视觉类：拍照、查看实物/图片、读取报告或可见文字。
+    # 只在客户端确实提供摄像头工具时命中；否则回退普通对话，避免
+    # 把没有摄像头的终端路由到一个永远无法执行的工具。
+    if _contains_any(
+        text,
+        [
+            "摄像头",
+            "相机",
+            "拍照",
+            "拍张照片",
+            "照片",
+            "图片",
+            "体检报告",
+            "检查报告",
+            "识别文字",
+            "读取文字",
+            "读一下这",
+            "看一下这",
+            "帮我看看这",
+            "这是什么",
+        ],
+    ):
+        return pick(
+            "vision",
+            ["self_camera_take_photo"],
+            "matched_vision_keywords",
+        )
+
     # 设备端 MCP / IoT 控制：音量、亮度、主题、状态等。
     if _contains_any(text, ["音量", "声音大", "声音小", "调大声", "调小声", "静音"]):
         return pick(
